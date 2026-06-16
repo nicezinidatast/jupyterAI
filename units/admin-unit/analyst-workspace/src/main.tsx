@@ -1330,15 +1330,18 @@ function JupyterWithCopilot() {
   const [panelOpen, setPanelOpen] = useState(true);
   const [panelWidth, setPanelWidth] = useState(420);
   const draggingRef = useRef(false);
+  const [dragging, setDragging] = useState(false);
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (!draggingRef.current) return;
       // Panel hugs the right edge → width = distance from cursor to that edge.
-      setPanelWidth(Math.min(900, Math.max(300, window.innerWidth - e.clientX)));
+      setPanelWidth(Math.min(900, Math.max(320, window.innerWidth - e.clientX)));
       e.preventDefault();
     };
     const onUp = () => {
+      if (!draggingRef.current) return;
       draggingRef.current = false;
+      setDragging(false);
       document.body.style.userSelect = '';
     };
     window.addEventListener('mousemove', onMove);
@@ -1355,16 +1358,25 @@ function JupyterWithCopilot() {
         <JupyterLab connectionId={activeConn} />
       </div>
 
+      {/* While dragging, this overlay sits above the iframe so the parent keeps
+          receiving mousemove/mouseup — otherwise the iframe swallows them and
+          the resize gets "stuck" (moves without the button held). */}
+      {dragging && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 50, cursor: 'col-resize' }} />
+      )}
+
       {panelOpen ? (
         <>
           {/* Drag this divider to resize the panel. */}
           <div
-            onMouseDown={() => {
+            onMouseDown={(e) => {
+              e.preventDefault();
               draggingRef.current = true;
+              setDragging(true);
               document.body.style.userSelect = 'none';
             }}
             title="드래그해서 크기 조절"
-            style={{ flex: '0 0 auto', width: 6, cursor: 'col-resize', background: '#e9ecef' }}
+            style={{ flex: '0 0 auto', width: 6, cursor: 'col-resize', background: dragging ? '#7048e8' : '#e9ecef' }}
           />
           <div
             style={{
@@ -1507,18 +1519,6 @@ function Shell() {
           label="📓  JupyterLab"
           onClick={() => setNavOpen(false)}
         />
-        <NavLink
-          component={Link}
-          to="/sql"
-          label="📝  빠른 SQL"
-          onClick={() => setNavOpen(true)}
-        />
-        <NavLink
-          component={Link}
-          to="/notebooks"
-          label="📚  내 노트북"
-          onClick={() => setNavOpen(true)}
-        />
       </AppShell.Navbar>
       <AppShell.Main
         style={{
@@ -1534,9 +1534,8 @@ function Shell() {
       >
         <Routes>
           <Route path="/" element={<JupyterWithCopilot />} />
-          <Route path="/sql" element={<QueryEditor />} />
-          <Route path="/notebooks" element={<NotebookList />} />
-          <Route path="/notebooks/:id" element={<NotebookDetail />} />
+          {/* 빠른 SQL / 내 노트북 페이지는 비활성화 — JupyterLab + LLM 중심. */}
+          <Route path="*" element={<JupyterWithCopilot />} />
         </Routes>
       </AppShell.Main>
     </AppShell>
