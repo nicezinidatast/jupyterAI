@@ -13,6 +13,7 @@ dependencies = [
     "admin-unit-backend",
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.30,<1",
+    "aiosqlite>=0.20,<1",  # default app DB driver (sqlite+aiosqlite)
     "pydantic-settings>=2.3,<3",
 ]
 

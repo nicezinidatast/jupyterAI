@@ -1,8 +1,14 @@
-"""Demo seed — runs once on startup when the relevant tables are empty.
+"""Startup seeding.
 
-Real deployments disable this by setting ``BACKEND_SEED_DEMO=false`` or by
-running with ``ENV=production``. The seed is idempotent: if any row already
-exists for a given target table, the seeder leaves it alone.
+Two distinct concerns live here:
+
+* :func:`bootstrap_admin` — **always** runs at startup. It guarantees exactly
+  one real admin account (identifier ``admin`` / password ``admin_st``) exists
+  and is active with the ``Admin`` role. Idempotent.
+* :func:`seed_demo_data` — the original showcase fixtures (demo users, demo
+  connections, PII patterns, fake backups/audit/notebooks/share-links). This is
+  now **opt-in** and only runs when ``BACKEND_SEED_DEMO=true``. It is idempotent
+  per-table.
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from admin_backend.models import Backup
 from auth.models import User, UserRole
+from auth.services.password import hash_password
 from credential.adapters.vault import VaultAdapter
 from credential.models import Credential
 from data.models import Connection, ConnectionGrant, PiiPattern
@@ -22,6 +29,53 @@ from dataplatform_shared.security.secret import Secret
 from dataplatform_shared.telemetry import get_logger
 
 logger = get_logger("backend.seed")
+
+# The real, unconditional admin account (shared contract).
+ADMIN_EMAIL = "admin"
+ADMIN_PASSWORD = "admin_st"
+ADMIN_DISPLAY_NAME = "Administrator"
+
+
+async def bootstrap_admin(session: AsyncSession) -> None:
+    """Ensure the real admin account exists, is active, and has the Admin role.
+
+    Idempotent: on re-runs it leaves an existing admin untouched (but repairs a
+    missing password hash / inactive flag / Admin role if a partial row exists).
+    Runs unconditionally on every startup — independent of BACKEND_SEED_DEMO.
+    """
+    user = (
+        await session.execute(select(User).where(User.email == ADMIN_EMAIL))
+    ).scalar_one_or_none()
+
+    if user is None:
+        user = User(
+            user_id=uuid4(),
+            email=ADMIN_EMAIL,
+            display_name=ADMIN_DISPLAY_NAME,
+            password_hash=hash_password(ADMIN_PASSWORD),
+            is_active=True,
+        )
+        session.add(user)
+        await session.flush()  # make user_id visible for the role insert
+        logger.info("admin_bootstrap_created")
+    else:
+        # Repair a partial/legacy row without overwriting a working one.
+        if not user.password_hash:
+            user.password_hash = hash_password(ADMIN_PASSWORD)
+        if not user.is_active:
+            user.is_active = True
+
+    has_admin_role = (
+        await session.execute(
+            select(UserRole).where(
+                UserRole.user_id == user.user_id, UserRole.role == "Admin"
+            )
+        )
+    ).scalar_one_or_none()
+    if has_admin_role is None:
+        session.add(UserRole(user_id=user.user_id, role="Admin"))
+
+    await session.commit()
 
 
 _DEMO_USERS: list[tuple[str, str, list[str]]] = [
@@ -55,7 +109,12 @@ _DEMO_PII: list[tuple[str, str, str]] = [
 async def seed_demo_data(
     session: AsyncSession, *, vault_adapter: VaultAdapter | None = None
 ) -> None:
-    """Insert demo rows where tables are empty. Commits per-domain."""
+    """Insert demo/showcase rows where tables are empty. Commits per-domain.
+
+    Opt-in only: ``backend.main`` invokes this exclusively when
+    ``BACKEND_SEED_DEMO=true``. The real admin account is handled separately by
+    :func:`bootstrap_admin` and is never gated by this flag.
+    """
     await _seed_users(session)
     await _seed_connections(session, vault_adapter=vault_adapter)
     await _seed_pii(session)

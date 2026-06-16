@@ -23,10 +23,15 @@ from dataclasses import dataclass
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, Header, HTTPException, Request, status
+from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from jwt import PyJWKClient
 
 _PLATFORM_ROLES = frozenset({"Admin", "Analyst", "Auditor", "Viewer"})
+
+# Name of the server-set httpOnly session cookie (shared contract). The browser
+# auto-sends it to same-origin /api and /jupyter, so SPAs never add an
+# Authorization header for normal requests.
+SESSION_COOKIE = "dp_session"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,21 +92,58 @@ def _demo_identity(x_user_email: str | None) -> AuthIdentity:
     return AuthIdentity(email="admin@example.test", roles=(), source="demo-default")
 
 
+async def _identity_from_session_cookie(
+    request: Request, cookie_value: str | None
+) -> AuthIdentity | None:
+    """Resolve a ``dp_session`` cookie to an identity, or ``None``.
+
+    Uses the app's session factory so endpoint signatures don't need to thread
+    a DB session through just for auth. Imported lazily to avoid a circular
+    import (session_service → models → … → this module).
+    """
+    if not cookie_value:
+        return None
+    factory = getattr(request.app.state, "session_factory", None)
+    if factory is None:
+        return None
+    from auth.services.session_service import resolve_session
+
+    async with factory() as db:
+        resolved = await resolve_session(db, cookie_value)
+        if resolved is None:
+            return None
+        user, roles = resolved
+        # Persist the last_seen_at touch from resolve_session.
+        await db.commit()
+        return AuthIdentity(
+            email=user.email,
+            roles=tuple(sorted(r for r in roles if r in _PLATFORM_ROLES)),
+            source="session-cookie",
+        )
+
+
 async def get_current_identity(
     request: Request,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
     x_user_email: Annotated[str | None, Header(alias="X-User-Email")] = None,
+    dp_session: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
 ) -> AuthIdentity:
     """Resolve the active identity for this request.
 
-    Hybrid policy (driven by ``request.app.state.oidc_verifier`` and
-    ``oidc_strict``):
+    Resolution order:
 
-    * Bearer token present → must verify, even when not strict. A bad token
-      is never silently downgraded to demo mode (SECURITY-09).
-    * No token + strict → 401.
-    * No token + not strict → demo fallback (header or seeded admin).
+    1. ``dp_session`` cookie → server-side session row (primary path for the
+       SPAs once a user has logged in / verified).
+    2. Bearer token present → must verify, even when not strict. A bad token
+       is never silently downgraded (SECURITY-09).
+    3. No token + strict → 401.
+    4. No token + not strict → demo fallback (``X-User-Email`` header or the
+       seeded admin) so legacy bring-up flows keep working.
     """
+    cookie_identity = await _identity_from_session_cookie(request, dp_session)
+    if cookie_identity is not None:
+        return cookie_identity
+
     verifier: OidcVerifier | None = getattr(request.app.state, "oidc_verifier", None)
     strict: bool = bool(getattr(request.app.state, "oidc_strict", False))
     has_bearer = bool(authorization and authorization.lower().startswith("bearer "))

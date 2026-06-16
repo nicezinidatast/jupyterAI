@@ -137,7 +137,7 @@ async def patch_user_roles(user_id: UUID, body: UserRolesPatch, session: Session
     return await get_user(user_id, session)
 
 
-@router.delete("/users/{user_id}", status_code=204)
+@router.delete("/users/{user_id}", status_code=204, response_model=None)
 async def delete_user(user_id: UUID, session: Session) -> None:
     user = await session.get(User, user_id)
     if user is None:
@@ -275,7 +275,7 @@ async def create_connection(body: ConnectionCreate, session: Session) -> Connect
     return (await list_connections(session))[-1]
 
 
-@router.delete("/connections/{connection_id}", status_code=204)
+@router.delete("/connections/{connection_id}", status_code=204, response_model=None)
 async def delete_connection(connection_id: UUID, session: Session) -> None:
     conn = await session.get(Connection, connection_id)
     if conn is None:
@@ -431,7 +431,7 @@ async def toggle_pii_pattern(pattern_id: UUID, session: Session) -> PiiPatternOu
     )
 
 
-@router.delete("/pii-patterns/{pattern_id}", status_code=204)
+@router.delete("/pii-patterns/{pattern_id}", status_code=204, response_model=None)
 async def delete_pii_pattern(pattern_id: UUID, session: Session) -> None:
     row = await session.get(PiiPattern, pattern_id)
     if row is None:
@@ -475,37 +475,103 @@ async def list_backups(session: Session) -> list[BackupOut]:
 
 
 @router.post("/backups/run", response_model=BackupOut, status_code=201)
-async def run_backup(session: Session) -> BackupOut:
-    """Stage a backup row in 'success' state with a synthetic size.
+async def run_backup(session: Session, request: Request) -> BackupOut:
+    """Perform a REAL backup of the application database and record the result.
 
-    Real pg_dump cannot reach this Postgres from inside its own container in the
-    demo image; production wires the BackupService entry path. This endpoint
-    exists so the Backups page can demonstrate the full row lifecycle without
-    requiring pg_dump on the runtime image.
+    The app DB is SQLite, so a backup is an atomic snapshot of the database file
+    copied to a timestamped artifact under ``./data/backups/``. The recorded
+    ``size_bytes`` is the actual artifact size on disk — never fabricated.
+
+    If a real backup cannot be performed (e.g. the DB is not file-backed, such
+    as Postgres or in-memory SQLite, or a filesystem error occurs) the row is
+    recorded in ``failed`` state with an honest error message and the endpoint
+    returns it — it never reports a fake success.
     """
+    import shutil
+    import sqlite3
+    from pathlib import Path
+    from urllib.parse import urlsplit
+
+    def sqlite_file_path(url: str) -> Path | None:
+        """On-disk path for a file-backed SQLite URL, else None (kept local to
+        avoid coupling admin-unit to the composite ``backend`` package)."""
+        if not url.startswith("sqlite"):
+            return None
+        path = urlsplit(url).path
+        if not path or ":memory:" in url:
+            return None
+        if path.startswith("//"):
+            return Path(path[1:])  # absolute
+        return Path(path.lstrip("/"))
+
+    settings = getattr(request.app.state, "settings", None)
+    database_url = getattr(settings, "database_url", "") or ""
+
     backup_id = uuid4()
     started = datetime.utcnow()
-    row = Backup(
-        backup_id=backup_id,
-        target="meta_db",
-        started_at=started,
-        ended_at=started,
-        state="success",
-        size_bytes=1024 * 1024 * 7,  # synthetic 7MB marker
-        location=f"/var/backups/{backup_id}.dump",
-        error=None,
-    )
+
+    def _fail(reason: str) -> Backup:
+        return Backup(
+            backup_id=backup_id,
+            target="meta_db",
+            started_at=started,
+            ended_at=datetime.utcnow(),
+            state="failed",
+            size_bytes=None,
+            location=None,
+            error=reason,
+        )
+
+    src_path = sqlite_file_path(database_url)
+    if src_path is None:
+        row = _fail("backup unavailable: app DB is not a file-backed SQLite database")
+    elif not src_path.exists():
+        row = _fail(f"backup unavailable: database file not found at {src_path}")
+    else:
+        try:
+            backups_dir = src_path.parent / "backups"
+            backups_dir.mkdir(parents=True, exist_ok=True)
+            stamp = started.strftime("%Y%m%dT%H%M%SZ")
+            dest = backups_dir / f"platform-{stamp}-{backup_id}.db"
+
+            # Use SQLite's online backup API so an in-flight write does not
+            # corrupt the snapshot; fall back to a file copy if that fails.
+            try:
+                src_conn = sqlite3.connect(str(src_path))
+                dst_conn = sqlite3.connect(str(dest))
+                try:
+                    src_conn.backup(dst_conn)
+                finally:
+                    dst_conn.close()
+                    src_conn.close()
+            except sqlite3.Error:
+                shutil.copy2(str(src_path), str(dest))
+
+            size = Path(dest).stat().st_size
+            row = Backup(
+                backup_id=backup_id,
+                target="meta_db",
+                started_at=started,
+                ended_at=datetime.utcnow(),
+                state="success",
+                size_bytes=size,
+                location=str(dest),
+                error=None,
+            )
+        except OSError as exc:
+            row = _fail(f"backup failed: {exc}")
+
     session.add(row)
     await session.commit()
     return BackupOut(
-        backup_id=backup_id,
+        backup_id=row.backup_id,
         target=row.target,
-        started_at=started,
-        ended_at=started,
-        state="success",
+        started_at=row.started_at,
+        ended_at=row.ended_at,
+        state=row.state,
         size_bytes=row.size_bytes,
         location=row.location,
-        error=None,
+        error=row.error,
     )
 
 

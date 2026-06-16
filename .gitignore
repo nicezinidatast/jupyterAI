@@ -61,6 +61,9 @@ Thumbs.db
 *.crt
 /run/secrets/
 
+# Runtime data (SQLite app DB + backups)
+/data/
+
 # Build artifacts
 *.whl
 *.tar.gz
