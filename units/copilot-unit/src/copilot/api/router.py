@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID, uuid4
@@ -98,6 +99,47 @@ async def current_provider() -> dict[str, str]:
     return {"provider": p.name}
 
 
+# In-memory TTL cache for schema introspection, keyed by connection_id (str).
+# Single-process app, so a plain module dict is sufficient (no lock needed).
+# Value shape: (monotonic_timestamp, engine, schema). Only successful
+# introspections are cached; errors fall through to a fresh DB hit next time.
+_SCHEMA_CACHE_TTL = 300.0  # seconds
+_schema_cache: dict[str, tuple[float, str, dict[str, Any] | None]] = {}
+
+
+def invalidate_schema_cache(connection_id: str | None = None) -> None:
+    """Drop cached introspection for one connection, or all of them.
+
+    Not wired to an endpoint, but available for callers that mutate a
+    connection's schema/credentials and need fresh metadata immediately.
+    """
+    if connection_id is None:
+        _schema_cache.clear()
+    else:
+        _schema_cache.pop(connection_id, None)
+
+
+async def _introspect_cached(
+    request: Request,
+    session: AsyncSession,
+    connection_id: UUID,
+) -> tuple[str, dict[str, Any] | None]:
+    """TTL-cached wrapper around :func:`_introspect` (biggest TTFT win).
+
+    On a fresh, non-expired hit we return the cached ``(engine, schema)``
+    without touching the DB. On miss/expiry we run the real introspection and
+    store the result.
+    """
+    key = str(connection_id)
+    now = time.monotonic()
+    cached = _schema_cache.get(key)
+    if cached is not None and (now - cached[0]) < _SCHEMA_CACHE_TTL:
+        return cached[1], cached[2]
+    engine, schema = await _introspect(request, session, connection_id)
+    _schema_cache[key] = (now, engine, schema)
+    return engine, schema
+
+
 async def _introspect(
     request: Request,
     session: AsyncSession,
@@ -150,6 +192,31 @@ _DEFAULT_PII_REGEXES: tuple[tuple[str, str], ...] = (
     ("phone", r"\b01[016789]-?\d{3,4}-?\d{4}\b"),
     ("rrn",   r"\b\d{6}-?\d{7}\b"),
 )
+
+
+# In-memory TTL cache for the compiled PII regex list. The set is small and
+# rarely changes, so recompiling it on every request is pure overhead.
+# Value shape: (monotonic_timestamp, patterns).
+_PII_CACHE_TTL = 60.0  # seconds
+_pii_cache: dict[str, tuple[float, list[tuple[str, re.Pattern[str]]]]] = {}
+
+
+def invalidate_pii_cache() -> None:
+    """Drop the cached PII regex list so the next request recompiles it."""
+    _pii_cache.clear()
+
+
+async def _load_pii_regexes_cached(
+    session: AsyncSession,
+) -> list[tuple[str, re.Pattern[str]]]:
+    """TTL-cached wrapper around :func:`_load_pii_regexes`."""
+    now = time.monotonic()
+    cached = _pii_cache.get("patterns")
+    if cached is not None and (now - cached[0]) < _PII_CACHE_TTL:
+        return cached[1]
+    patterns = await _load_pii_regexes(session)
+    _pii_cache["patterns"] = (now, patterns)
+    return patterns
 
 
 async def _load_pii_regexes(session: AsyncSession) -> list[tuple[str, re.Pattern[str]]]:
@@ -224,7 +291,7 @@ async def chat(
     schema: dict[str, Any] | None = None
     if body.connection_id:
         try:
-            engine, schema = await _introspect(request, session, UUID(body.connection_id))
+            engine, schema = await _introspect_cached(request, session, UUID(body.connection_id))
         except ValueError:
             raise HTTPException(status_code=422, detail="invalid connection id") from None
 
@@ -235,7 +302,7 @@ async def chat(
     ]
     messages.append({"role": "user", "content": body.question})
 
-    pii_patterns = await _load_pii_regexes(session)
+    pii_patterns = await _load_pii_regexes_cached(session)
 
     audit_id = uuid4()
 

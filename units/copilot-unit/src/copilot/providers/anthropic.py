@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from typing import Any
 
 from copilot.providers.base import ChatMessage
 
@@ -22,7 +23,7 @@ class AnthropicProvider:
         self,
         *,
         api_key: str | None = None,
-        model: str = "claude-sonnet-4-6",
+        model: str | None = None,
     ) -> None:
         # Import lazily so tests + non-anthropic deployments don't need the SDK.
         from anthropic import AsyncAnthropic
@@ -31,7 +32,11 @@ class AnthropicProvider:
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is not set")
         self._client = AsyncAnthropic(api_key=api_key)
-        self._model = model
+        # Configurable via COPILOT_ANTHROPIC_MODEL; default is the current
+        # valid Sonnet 4.6 model id. An explicit model arg always wins.
+        self._model = model or os.environ.get(
+            "COPILOT_ANTHROPIC_MODEL", "claude-sonnet-4-6"
+        )
 
     async def stream(
         self,
@@ -39,10 +44,23 @@ class AnthropicProvider:
         system: str,
         messages: list[ChatMessage],
     ) -> AsyncIterator[str]:
+        # Use Anthropic prompt caching for the (often large, schema-bearing)
+        # system prompt so it's cached server-side across multi-turn requests.
+        # Fall back to the plain string when there's nothing worth caching.
+        system_param: Any = system
+        if system:
+            system_param = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
         async with self._client.messages.stream(
             model=self._model,
             max_tokens=2048,
-            system=system,
+            temperature=0,
+            system=system_param,
             messages=[{"role": m["role"], "content": m["content"]} for m in messages],
         ) as stream:
             async for chunk in stream.text_stream:
