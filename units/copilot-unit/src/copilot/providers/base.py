@@ -28,6 +28,11 @@ class CopilotProvider(Protocol):
         *,
         system: str,
         messages: list[ChatMessage],
+        model: str | None = None,
     ) -> AsyncIterator[str]:
-        """Yield text chunks as they arrive from the model."""
+        """Yield text chunks as they arrive from the model.
+
+        ``model`` optionally overrides the provider's default model for this
+        single call (e.g. a lighter model for one-shot cell edits).
+        """
         ...

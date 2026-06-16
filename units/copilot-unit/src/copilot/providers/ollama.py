@@ -34,9 +34,10 @@ class OllamaProvider:
         *,
         system: str,
         messages: list[ChatMessage],
+        model: str | None = None,
     ) -> AsyncIterator[str]:
         payload = {
-            "model": self._model,
+            "model": model or self._model,
             "messages": [{"role": "system", "content": system}]
             + [{"role": m["role"], "content": m["content"]} for m in messages],
             "stream": True,

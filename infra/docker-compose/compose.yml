@@ -55,6 +55,9 @@ services:
       # Defining them here would override env_file at compose level.
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:7b}
+      # Per-cell edits are single-shot (no multi-turn) → use a lighter/faster
+      # model. Anthropic Haiku by default; override or unset for provider default.
+      COPILOT_EDIT_MODEL: ${COPILOT_EDIT_MODEL:-claude-haiku-4-5-20251001}
       # OIDC — defaults to off so the SPA boots without Keycloak. Set to
       # 'true' (plus bring up the keycloak service) to require real bearer
       # tokens. Issuer is pinned to the docker-network hostname so tokens

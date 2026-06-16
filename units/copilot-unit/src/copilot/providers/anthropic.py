@@ -43,6 +43,7 @@ class AnthropicProvider:
         *,
         system: str,
         messages: list[ChatMessage],
+        model: str | None = None,
     ) -> AsyncIterator[str]:
         # Use Anthropic prompt caching for the (often large, schema-bearing)
         # system prompt so it's cached server-side across multi-turn requests.
@@ -57,7 +58,7 @@ class AnthropicProvider:
                 }
             ]
         async with self._client.messages.stream(
-            model=self._model,
+            model=model or self._model,
             max_tokens=2048,
             temperature=0,
             system=system_param,

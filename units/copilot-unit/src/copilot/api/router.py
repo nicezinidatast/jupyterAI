@@ -15,6 +15,7 @@ Flow per request:
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -422,7 +423,10 @@ async def edit_cell(
     chunks: list[str] = []
     try:
         async for chunk in provider.stream(
-            system=system_prompt, messages=[{"role": "user", "content": user}]
+            system=system_prompt,
+            messages=[{"role": "user", "content": user}],
+            # Single-shot, no multi-turn → use the lighter/faster model when set.
+            model=os.environ.get("COPILOT_EDIT_MODEL") or None,
         ):
             chunks.append(chunk)
     except Exception as exc:  # noqa: BLE001
