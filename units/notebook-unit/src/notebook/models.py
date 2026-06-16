@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     CheckConstraint,
     DateTime,
@@ -69,7 +70,7 @@ class NotebookVersion(Base):
     )
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     content: Mapped[dict[str, Any]] = mapped_column(
-        JSONB().with_variant(Text(), "sqlite"), nullable=False
+        JSONB().with_variant(JSON(), "sqlite"), nullable=False
     )
     saved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -87,7 +88,9 @@ class GitCommitOutbox(Base):
         ),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer(), "sqlite"), primary_key=True, autoincrement=True
+    )
     notebook_version_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("notebook_versions.version_id"),

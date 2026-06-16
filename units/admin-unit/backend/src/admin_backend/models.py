@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     CheckConstraint,
     DateTime,
@@ -58,7 +59,7 @@ class RestoreRehearsal(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="running")
     report: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB().with_variant(Text(), "sqlite")
+        JSONB().with_variant(JSON(), "sqlite")
     )
 
 

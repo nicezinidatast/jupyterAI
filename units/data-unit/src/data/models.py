@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -44,7 +45,7 @@ class Connection(Base):
     database: Mapped[str | None] = mapped_column(String(128))
     credential_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
     options: Mapped[dict[str, Any]] = mapped_column(
-        JSONB().with_variant(Text(), "sqlite"), server_default="{}"
+        JSONB().with_variant(JSON(), "sqlite"), server_default="{}"
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
