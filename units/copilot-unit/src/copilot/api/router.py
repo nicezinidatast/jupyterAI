@@ -342,3 +342,116 @@ async def chat(
                 await session.rollback()
 
     return StreamingResponse(generator(), media_type="application/x-ndjson")
+
+
+# ---------------------------------------------------------------------------
+# Per-cell inline edit — Cursor-style "rewrite this cell" via the LLM.
+# Non-streaming: returns the full modified cell source so the SPA can replace
+# the active cell's content in one shot.
+# ---------------------------------------------------------------------------
+_EDIT_SYSTEM = """\
+You are editing a SINGLE code cell inside a JupyterLab notebook.
+Apply the user's instruction to the given cell and return the COMPLETE modified
+cell — not a diff, not a snippet.
+
+Hard rules:
+1. Return ONLY the code, wrapped in exactly one fenced block tagged with the
+   cell's language (```python or ```sql). No prose before or after.
+2. Preserve everything that still works; change only what the instruction asks.
+3. If the cell is SQL (starts with %%sql or is plainly SQL), keep it SQL and
+   keep the %%sql magic if it was present.
+4. Use ONLY tables/columns from the SCHEMA block (if present). Never echo PII
+   values.
+"""
+
+_CODE_FENCE_RE = re.compile(r"```(?:sql|python|py)?\s*\n?(.*?)```", re.IGNORECASE | re.DOTALL)
+
+
+def _extract_code(text: str) -> str:
+    """Pull the first fenced code block; fall back to the trimmed text."""
+    m = _CODE_FENCE_RE.search(text)
+    if m:
+        return m.group(1).strip("\n")
+    return text.strip()
+
+
+class EditCellRequest(BaseModel):
+    source: str = Field(default="", max_length=20000)
+    instruction: str = Field(min_length=1, max_length=4000)
+    language: str = Field(default="python", pattern="^(python|sql)$")
+    connection_id: str | None = None
+
+
+@router.post("/edit-cell")
+async def edit_cell(
+    body: EditCellRequest,
+    session: Session,
+    request: Request,
+) -> dict[str, str]:
+    """Rewrite a single notebook cell per the instruction; return the new source."""
+    actor_key = request.headers.get("x-forwarded-user") or (
+        request.client.host if request.client else "anonymous"
+    )
+    if await _copilot_rate_limited(request, f"copilot-edit:{actor_key}"):
+        raise HTTPException(status_code=429, detail="copilot rate limit exceeded (10 req/min)")
+    try:
+        provider = get_provider()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"copilot provider unavailable: {exc!s}") from None
+
+    engine = ""
+    schema: dict[str, Any] | None = None
+    if body.connection_id:
+        try:
+            engine, schema = await _introspect_cached(request, session, UUID(body.connection_id))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="invalid connection id") from None
+
+    system_prompt = (
+        _EDIT_SYSTEM.strip()
+        + "\n\n"
+        + build_system_prompt(connection_engine=engine, schema=schema)
+    )
+    user = (
+        f"Current cell ({body.language}):\n"
+        f"```{body.language}\n{body.source}\n```\n\n"
+        f"Instruction: {body.instruction}\n\n"
+        "Return the full modified cell as one fenced code block."
+    )
+
+    chunks: list[str] = []
+    try:
+        async for chunk in provider.stream(
+            system=system_prompt, messages=[{"role": "user", "content": user}]
+        ):
+            chunks.append(chunk)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"copilot edit failed: {exc!s}") from None
+
+    pii_patterns = await _load_pii_regexes_cached(session)
+    edited = _mask_text(_extract_code("".join(chunks)), pii_patterns)
+
+    try:
+        session.add(
+            AuditLog(
+                event_type="copilot_cell_edit",
+                actor_id="anonymous",
+                resource=f"copilot:{provider.name}",
+                result="success" if edited else "failure",
+                occurred_at=datetime.utcnow(),
+                corr_id=f"copilot-edit-{uuid4()}",
+                payload={
+                    "provider": provider.name,
+                    "connection_id": body.connection_id,
+                    "schema_attached": schema is not None,
+                    "instruction_chars": len(body.instruction),
+                    "result_chars": len(edited),
+                    "row_data_transmitted": False,
+                },
+            )
+        )
+        await session.commit()
+    except Exception:  # noqa: BLE001
+        await session.rollback()
+
+    return {"source": edited, "language": body.language}

@@ -872,6 +872,11 @@ function CopilotPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [providerName, setProviderName] = useState<string>('');
+  // Per-cell inline edit ("Cursor-style"): instruction → LLM rewrites the cell
+  // currently selected in the embedded JupyterLab.
+  const [editInstr, setEditInstr] = useState('');
+  const [editBusy, setEditBusy] = useState(false);
+  const [editMsg, setEditMsg] = useState<string | null>(null);
   const [lastInsert, setLastInsert] = useState<string | null>(null);
   // Track which (sendSeq, blockIdx) pairs have already auto-inserted so
   // re-renders don't fire duplicate PUT/audit round-trips for the same block.
@@ -1034,6 +1039,54 @@ function CopilotPanel({
     }
   };
 
+  // Rewrite the cell currently selected in the embedded JupyterLab via the LLM.
+  const editActiveCell = async () => {
+    setEditMsg(null);
+    const instruction = editInstr.trim();
+    if (!instruction) return;
+    const panel = getActiveNotebookPanel();
+    const cell = panel?.content?.activeCell;
+    if (!panel || !cell) {
+      setEditMsg('먼저 JupyterLab에서 수정할 셀을 클릭하세요.');
+      return;
+    }
+    if (cell.model?.type !== 'code') {
+      setEditMsg('코드 셀만 수정할 수 있습니다.');
+      return;
+    }
+    const sm = cell.model.sharedModel;
+    const source: string =
+      typeof sm?.getSource === 'function' ? sm.getSource() : String(cell.model.source ?? '');
+    const language = /^\s*%%sql\b/.test(source) ? 'sql' : 'python';
+    setEditBusy(true);
+    try {
+      const res = await fetch('/api/copilot/edit-cell', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ source, instruction, language, connection_id: connectionId }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.detail ?? `${res.status} ${res.statusText}`);
+      }
+      const data = await res.json();
+      sm.setSource(data.source ?? '');
+      try {
+        await panel.context.save();
+      } catch {
+        /* live model already updated; the analyst can save manually */
+      }
+      setEditInstr('');
+      setEditMsg('✓ 선택한 셀을 수정했습니다.');
+      window.setTimeout(() => setEditMsg(null), 4000);
+    } catch (e) {
+      setEditMsg(`셀 수정 실패: ${(e as Error).message}`);
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
   return (
     // The CopilotPanel lives inside AppShell.Main, which Mantine sizes via
     // a layered layout that breaks naïve height:100% chains. Pin the panel
@@ -1142,6 +1195,36 @@ function CopilotPanel({
       )}
       {error && <Notification color="red" title="실패" onClose={() => setError(null)}>{error}</Notification>}
       {lastInsert && <Notification color="green" title="삽입 완료" onClose={() => setLastInsert(null)}>{lastInsert}</Notification>}
+
+      {/* Per-cell inline edit: rewrite the cell selected in JupyterLab. */}
+      <Stack gap={4}>
+        {editMsg && (
+          <Text size="xs" c={editMsg.startsWith('✓') ? 'teal' : 'red'}>{editMsg}</Text>
+        )}
+        <Group gap={6} wrap="nowrap">
+          <TextInput
+            size="xs"
+            placeholder="선택한 셀을 이렇게 고쳐줘 (예: 에러 처리 추가)"
+            value={editInstr}
+            onChange={(e) => setEditInstr(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && editInstr.trim()) editActiveCell();
+            }}
+            disabled={editBusy}
+            style={{ flex: 1 }}
+          />
+          <Button
+            size="xs"
+            variant="light"
+            color="grape"
+            onClick={editActiveCell}
+            loading={editBusy}
+            disabled={!editInstr.trim()}
+          >
+            ✏️ 셀 수정
+          </Button>
+        </Group>
+      </Stack>
 
       <Group gap={6}>
         <Textarea
