@@ -8,23 +8,6 @@ x-restart: &restart
   restart: unless-stopped
 
 services:
-  postgres:
-    image: postgres:16
-    <<: *restart
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-dataplatform}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres}"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   redis:
     image: redis:7-alpine
     <<: *restart
@@ -91,8 +74,6 @@ services:
       - ../../backend/src:/src/backend:ro
       - uploads-data:/uploads
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
       demo-postgres:
@@ -383,7 +364,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
 volumes:
-  postgres-data:
   redis-data:
   jupyter-data:
   demo-postgres-data:
