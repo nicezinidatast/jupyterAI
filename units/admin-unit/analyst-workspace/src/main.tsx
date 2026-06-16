@@ -1099,7 +1099,7 @@ function CopilotPanel({
       style={{ height: 'calc(100vh - 88px)', overflow: 'hidden' }}
     >
       <Group justify="space-between">
-        <Title order={5}>🤖 분석 코파일럿</Title>
+        <Title order={5}>🤖 다분석할Zini</Title>
         {providerName && <Badge variant="light">{providerName}</Badge>}
       </Group>
 
@@ -1140,7 +1140,7 @@ function CopilotPanel({
             <Card key={i} withBorder padding="sm" radius="sm" style={{ flexShrink: 0 }}>
               <Group gap="xs" mb={4}>
                 <Badge size="xs" color={m.role === 'user' ? 'blue' : 'grape'}>
-                  {m.role === 'user' ? '나' : '코파일럿'}
+                  {m.role === 'user' ? '나' : 'Zini'}
                 </Badge>
               </Group>
               {/* Code answers: show the prose around the code (if any), not
@@ -1256,32 +1256,98 @@ function JupyterWithCopilot() {
   const activeConn = connId ?? defaultConn;
   const [labReloadToken, setLabReloadToken] = useState(0);
 
+  // Collapsible + drag-resizable copilot panel.
+  const [panelOpen, setPanelOpen] = useState(true);
+  const [panelWidth, setPanelWidth] = useState(420);
+  const draggingRef = useRef(false);
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!draggingRef.current) return;
+      // Panel hugs the right edge → width = distance from cursor to that edge.
+      setPanelWidth(Math.min(900, Math.max(300, window.innerWidth - e.clientX)));
+      e.preventDefault();
+    };
+    const onUp = () => {
+      draggingRef.current = false;
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, []);
+
   return (
-    <div style={{ display: 'flex', height: '100%', width: '100%' }}>
-      <div style={{ flex: '1 1 65%', minWidth: 320, height: '100%' }}>
+    <div style={{ display: 'flex', height: '100%', width: '100%', position: 'relative' }}>
+      <div style={{ flex: '1 1 auto', minWidth: 280, height: '100%' }}>
         <JupyterLab reloadToken={labReloadToken} />
       </div>
-      <div style={{ flex: '0 0 35%', minWidth: 320, maxWidth: 600, height: '100%', borderLeft: '1px solid #e9ecef', background: '#fafafa' }}>
-        <Stack p={0} gap={0} style={{ height: '100%' }}>
-          <Group p="xs" gap="xs" align="center" style={{ borderBottom: '1px solid #e9ecef' }}>
-            <Text size="xs" c="dimmed">커넥션 컨텍스트</Text>
-            <Select
-              size="xs"
-              value={activeConn}
-              data={(conns.data ?? []).map((c) => ({ value: c.connection_id, label: c.name }))}
-              onChange={setConnId}
-              placeholder="선택"
-              style={{ flex: 1 }}
-            />
-          </Group>
-          <div style={{ flex: 1, minHeight: 0 }}>
-            <CopilotPanel
-              connectionId={activeConn}
-              onCellInserted={() => setLabReloadToken((n) => n + 1)}
-            />
+
+      {panelOpen ? (
+        <>
+          {/* Drag this divider to resize the panel. */}
+          <div
+            onMouseDown={() => {
+              draggingRef.current = true;
+              document.body.style.userSelect = 'none';
+            }}
+            title="드래그해서 크기 조절"
+            style={{ flex: '0 0 auto', width: 6, cursor: 'col-resize', background: '#e9ecef' }}
+          />
+          <div
+            style={{
+              flex: '0 0 auto',
+              width: panelWidth,
+              minWidth: 300,
+              height: '100%',
+              borderLeft: '1px solid #e9ecef',
+              background: '#fafafa',
+            }}
+          >
+            <Stack p={0} gap={0} style={{ height: '100%' }}>
+              <Group p="xs" gap="xs" align="center" wrap="nowrap" style={{ borderBottom: '1px solid #e9ecef' }}>
+                <Text size="xs" c="dimmed">커넥션</Text>
+                <Select
+                  size="xs"
+                  value={activeConn}
+                  data={(conns.data ?? []).map((c) => ({ value: c.connection_id, label: c.name }))}
+                  onChange={setConnId}
+                  placeholder="선택"
+                  style={{ flex: 1 }}
+                />
+                <Button
+                  size="xs"
+                  variant="subtle"
+                  color="gray"
+                  px={6}
+                  onClick={() => setPanelOpen(false)}
+                  title="패널 닫기"
+                >
+                  ✕
+                </Button>
+              </Group>
+              <div style={{ flex: 1, minHeight: 0 }}>
+                <CopilotPanel
+                  connectionId={activeConn}
+                  onCellInserted={() => setLabReloadToken((n) => n + 1)}
+                />
+              </div>
+            </Stack>
           </div>
-        </Stack>
-      </div>
+        </>
+      ) : (
+        <Button
+          size="xs"
+          variant="filled"
+          color="grape"
+          onClick={() => setPanelOpen(true)}
+          style={{ position: 'absolute', top: 8, right: 8, zIndex: 5 }}
+        >
+          🤖 다분석할Zini 열기
+        </Button>
+      )}
     </div>
   );
 }
