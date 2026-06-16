@@ -51,7 +51,10 @@ services:
     env_file:
       - ../../backend/.env
     environment:
-      BACKEND_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-dataplatform}
+      # App data store = SQLite. Lives under /uploads (already a persistent,
+      # world-writable volume) so the non-root 'app' user can open the DB file
+      # without a dedicated chmod'd volume. Override for Postgres if preferred.
+      BACKEND_DATABASE_URL: sqlite+aiosqlite:////uploads/appdb/app.db
       BACKEND_REDIS_URL: redis://:${REDIS_PASSWORD:-redis}@redis:6379/0
       BACKEND_LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Stable Fernet key for local-KMS vault adapter. Demo default is a fixed
