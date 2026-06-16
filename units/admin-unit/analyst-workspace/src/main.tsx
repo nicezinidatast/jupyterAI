@@ -103,7 +103,12 @@ const api = {
       }
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
       // Backend shape is { user: {...} }; unwrap to the flat Me the UI uses.
-      return r.json().then((d) => d.user as Me);
+      return r.json().then((d) => {
+        const u = d.user as Me;
+        // Give each analyst their own copilot notebook (copilot-<id>.ipynb).
+        setCopilotNotebookForUser(u?.email);
+        return u;
+      });
     }),
   connections: () => fetch('/api/connections').then((r) => r.json() as Promise<Connection[]>),
   schema: (id: string) =>
@@ -596,9 +601,19 @@ function JupyterLab({ connectionId }: { connectionId: string | null }) {
 // ---------------------------------------------------------------------------
 // Jupyter cell injection — append a code cell to the shared copilot.ipynb
 // ---------------------------------------------------------------------------
-const COPILOT_NOTEBOOK = 'copilot.ipynb';
+// Per-user copilot notebook so multiple analysts on the shared JupyterLab
+// don't clobber one another. Defaults to copilot.ipynb until the logged-in
+// user is known (set via setCopilotNotebookForUser from api.me).
+let COPILOT_NOTEBOOK = 'copilot.ipynb';
 const JUPYTER_TOKEN = 'dataplatform';
-const COPILOT_NOTEBOOK_URL = `/jupyter/api/contents/${COPILOT_NOTEBOOK}`;
+let COPILOT_NOTEBOOK_URL = `/jupyter/api/contents/${COPILOT_NOTEBOOK}`;
+
+function setCopilotNotebookForUser(username: string | null | undefined): void {
+  const safe =
+    (username || 'user').toLowerCase().replace(/[^a-z0-9_.-]/g, '_').slice(0, 40) || 'user';
+  COPILOT_NOTEBOOK = `copilot-${safe}.ipynb`;
+  COPILOT_NOTEBOOK_URL = `/jupyter/api/contents/${COPILOT_NOTEBOOK}`;
+}
 
 // Shared request headers for the Jupyter contents API (same auth/no-cache
 // approach used by every copilot.ipynb call below).
