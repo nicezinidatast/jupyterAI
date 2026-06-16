@@ -554,50 +554,24 @@ function Markdown({ children }: { children: string }) {
 }
 
 function JupyterLab({ reloadToken }: { reloadToken: number }) {
-  // Land directly on copilot.ipynb so the user sees freshly-inserted cells
-  // without having to navigate the file browser. The `reloadToken` is bumped
-  // by the parent after every PUT so we re-mount the iframe and re-read the
-  // notebook from disk (JupyterLab itself does not auto-refresh on external
-  // file changes — it only shows a "changed on disk" modal that the user
-  // would have to click every single time).
+  // Land on the JupyterLab HOME (not a specific notebook) so the workspace
+  // opens cleanly even when copilot.ipynb does not exist — on first entry or
+  // after the user deletes it. The copilot creates copilot.ipynb on demand when
+  // it inserts the first cell and bumps `reloadToken`; only then do we open the
+  // notebook so the freshly-inserted cell is visible. (JupyterLab does not
+  // auto-refresh on external file changes, hence the iframe re-mount.)
   //
-  // While the new iframe is loading we fade the contents so the user sees a
-  // smooth transition instead of a hard white flash.
+  // While the new iframe is loading we fade the contents for a smooth
+  // transition instead of a hard white flash.
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     setLoading(true);
   }, [reloadToken]);
 
-  // Don't navigate the iframe to copilot.ipynb until we've guaranteed the file
-  // exists — otherwise JupyterLab shows "could not find path: copilot.ipynb"
-  // on the very first workspace entry.
-  const [nbReady, setNbReady] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    ensureCopilotNotebook()
-      .catch(() => {
-        // Best-effort: even if the GET/PUT fails (e.g. Jupyter not up yet),
-        // fall through and let the iframe try — it can still recover once the
-        // backend is reachable.
-      })
-      .finally(() => {
-        if (!cancelled) setNbReady(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Until the notebook is confirmed/created, render a placeholder instead of
-  // pointing the iframe at copilot.ipynb.
-  const src = `/jupyter/lab/tree/copilot.ipynb?token=dataplatform&reset&t=${reloadToken}`;
-  if (!nbReady) {
-    return (
-      <Group justify="center" align="center" style={{ width: '100%', height: '100%' }}>
-        <Loader size="sm" />
-      </Group>
-    );
-  }
+  const src =
+    reloadToken > 0
+      ? `/jupyter/lab/tree/copilot.ipynb?token=dataplatform&reset&t=${reloadToken}`
+      : `/jupyter/lab?token=dataplatform`;
   return (
     <iframe
       key={reloadToken}
@@ -667,25 +641,6 @@ async function putCopilotNotebook(content: any): Promise<void> {
   if (!put.ok) {
     throw new Error(`Jupyter PUT failed: ${put.status}`);
   }
-}
-
-// Idempotently make sure copilot.ipynb exists before the iframe navigates to
-// it — otherwise JupyterLab shows "could not find path: copilot.ipynb" on the
-// very first workspace entry. GET first; only create (PUT an empty notebook)
-// when it is missing (404).
-async function ensureCopilotNotebook(): Promise<void> {
-  const head = await fetch(`${COPILOT_NOTEBOOK_URL}?_=${Date.now()}`, {
-    headers: copilotApiHeaders(),
-    credentials: 'omit',
-    cache: 'no-store',
-  });
-  if (head.ok) {
-    return; // already exists — nothing to do
-  }
-  if (head.status !== 404) {
-    throw new Error(`Jupyter GET failed: ${head.status}`);
-  }
-  await putCopilotNotebook(emptyCopilotNotebook().content);
 }
 
 async function appendCellToCopilotNotebook(language: 'sql' | 'python', source: string): Promise<void> {
