@@ -16,7 +16,9 @@
     "@mantine/core": "^7.13.0",
     "@mantine/hooks": "^7.13.0",
     "plotly.js-dist-min": "^2.35.2",
-    "react-plotly.js": "^2.6.0"
+    "react-plotly.js": "^2.6.0",
+    "react-markdown": "^9.0.1",
+    "remark-gfm": "^4.0.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.5",

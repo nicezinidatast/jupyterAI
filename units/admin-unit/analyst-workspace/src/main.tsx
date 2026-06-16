@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import {
   AppShell,
   Badge,
+  Box,
   Burger,
   Button,
   Card,
@@ -24,6 +25,8 @@ import {
 } from '@mantine/core';
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Plot from 'react-plotly.js';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
   BrowserRouter,
   Link,
@@ -494,6 +497,52 @@ function NotebookDetail() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Markdown — render copilot prose (headings, bold, lists, inline/fenced code)
+// inside the Mantine chat bubble. Tight margins so it reads like a chat reply,
+// monospace + light-gray treatment for code. The scoped <style> targets the
+// elements react-markdown emits (which we cannot reach with inline styles).
+// ---------------------------------------------------------------------------
+function Markdown({ children }: { children: string }) {
+  return (
+    <Box className="copilot-md" fz="sm">
+      <style>{`
+        .copilot-md > :first-child { margin-top: 0; }
+        .copilot-md > :last-child { margin-bottom: 0; }
+        .copilot-md p { margin: 0.35em 0; line-height: 1.5; }
+        .copilot-md ul, .copilot-md ol { margin: 0.35em 0; padding-left: 1.4em; }
+        .copilot-md li { margin: 0.15em 0; }
+        .copilot-md h1, .copilot-md h2, .copilot-md h3,
+        .copilot-md h4, .copilot-md h5, .copilot-md h6 {
+          margin: 0.6em 0 0.3em; line-height: 1.3; font-weight: 700;
+        }
+        .copilot-md code {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          font-size: 0.85em; background: #f1f3f5; padding: 0.1em 0.35em;
+          border-radius: 4px;
+        }
+        .copilot-md pre {
+          background: #f1f3f5; padding: 0.6em 0.75em; border-radius: 6px;
+          overflow: auto; margin: 0.45em 0;
+        }
+        .copilot-md pre code {
+          background: transparent; padding: 0; font-size: 0.82em; line-height: 1.45;
+        }
+        .copilot-md a { color: #1c7ed6; }
+        .copilot-md blockquote {
+          margin: 0.45em 0; padding-left: 0.75em; border-left: 3px solid #dee2e6;
+          color: #495057;
+        }
+        .copilot-md table { border-collapse: collapse; margin: 0.45em 0; }
+        .copilot-md th, .copilot-md td {
+          border: 1px solid #dee2e6; padding: 0.25em 0.5em;
+        }
+      `}</style>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{children}</ReactMarkdown>
+    </Box>
+  );
+}
+
 function JupyterLab({ reloadToken }: { reloadToken: number }) {
   // Land directly on copilot.ipynb so the user sees freshly-inserted cells
   // without having to navigate the file browser. The `reloadToken` is bumped
@@ -509,7 +558,36 @@ function JupyterLab({ reloadToken }: { reloadToken: number }) {
     setLoading(true);
   }, [reloadToken]);
 
+  // Don't navigate the iframe to copilot.ipynb until we've guaranteed the file
+  // exists — otherwise JupyterLab shows "could not find path: copilot.ipynb"
+  // on the very first workspace entry.
+  const [nbReady, setNbReady] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    ensureCopilotNotebook()
+      .catch(() => {
+        // Best-effort: even if the GET/PUT fails (e.g. Jupyter not up yet),
+        // fall through and let the iframe try — it can still recover once the
+        // backend is reachable.
+      })
+      .finally(() => {
+        if (!cancelled) setNbReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Until the notebook is confirmed/created, render a placeholder instead of
+  // pointing the iframe at copilot.ipynb.
   const src = `/jupyter/lab/tree/copilot.ipynb?token=dataplatform&reset&t=${reloadToken}`;
+  if (!nbReady) {
+    return (
+      <Group justify="center" align="center" style={{ width: '100%', height: '100%' }}>
+        <Loader size="sm" />
+      </Group>
+    );
+  }
   return (
     <iframe
       key={reloadToken}
@@ -534,10 +612,12 @@ function JupyterLab({ reloadToken }: { reloadToken: number }) {
 // ---------------------------------------------------------------------------
 const COPILOT_NOTEBOOK = 'copilot.ipynb';
 const JUPYTER_TOKEN = 'dataplatform';
+const COPILOT_NOTEBOOK_URL = `/jupyter/api/contents/${COPILOT_NOTEBOOK}`;
 
-async function appendCellToCopilotNotebook(language: 'sql' | 'python', source: string): Promise<void> {
-  const url = `/jupyter/api/contents/${COPILOT_NOTEBOOK}`;
-  const headers: HeadersInit = {
+// Shared request headers for the Jupyter contents API (same auth/no-cache
+// approach used by every copilot.ipynb call below).
+function copilotApiHeaders(): HeadersInit {
+  return {
     'Content-Type': 'application/json',
     Authorization: `token ${JUPYTER_TOKEN}`,
     // Belt-and-suspenders against a stale GET hiding cells the user (or a
@@ -546,6 +626,61 @@ async function appendCellToCopilotNotebook(language: 'sql' | 'python', source: s
     'Cache-Control': 'no-cache',
     Pragma: 'no-cache',
   };
+}
+
+// A minimal but valid empty notebook (nbformat 4, python3 kernel). Defined
+// once so both the create-on-empty path and the ensure-exists path agree.
+function emptyCopilotNotebook(): any {
+  return {
+    type: 'notebook',
+    content: {
+      cells: [],
+      metadata: { kernelspec: { name: 'python3', display_name: 'Python 3' } },
+      nbformat: 4,
+      nbformat_minor: 5,
+    },
+    format: 'json',
+    name: COPILOT_NOTEBOOK,
+    path: COPILOT_NOTEBOOK,
+  };
+}
+
+// PUT a notebook's `content` to the Jupyter contents API. Shared by the
+// append path and the ensure-exists path.
+async function putCopilotNotebook(content: any): Promise<void> {
+  const put = await fetch(COPILOT_NOTEBOOK_URL, {
+    method: 'PUT',
+    headers: copilotApiHeaders(),
+    credentials: 'omit',
+    body: JSON.stringify({ type: 'notebook', format: 'json', content }),
+  });
+  if (!put.ok) {
+    throw new Error(`Jupyter PUT failed: ${put.status}`);
+  }
+}
+
+// Idempotently make sure copilot.ipynb exists before the iframe navigates to
+// it — otherwise JupyterLab shows "could not find path: copilot.ipynb" on the
+// very first workspace entry. GET first; only create (PUT an empty notebook)
+// when it is missing (404).
+async function ensureCopilotNotebook(): Promise<void> {
+  const head = await fetch(`${COPILOT_NOTEBOOK_URL}?_=${Date.now()}`, {
+    headers: copilotApiHeaders(),
+    credentials: 'omit',
+    cache: 'no-store',
+  });
+  if (head.ok) {
+    return; // already exists — nothing to do
+  }
+  if (head.status !== 404) {
+    throw new Error(`Jupyter GET failed: ${head.status}`);
+  }
+  await putCopilotNotebook(emptyCopilotNotebook().content);
+}
+
+async function appendCellToCopilotNotebook(language: 'sql' | 'python', source: string): Promise<void> {
+  const url = COPILOT_NOTEBOOK_URL;
+  const headers = copilotApiHeaders();
 
   let notebook: any | null = null;
   // `?_=` cache buster — jupyter ignores unknown query params.
@@ -558,18 +693,7 @@ async function appendCellToCopilotNotebook(language: 'sql' | 'python', source: s
     notebook = await head.json();
   }
   if (!notebook) {
-    notebook = {
-      type: 'notebook',
-      content: {
-        cells: [],
-        metadata: { kernelspec: { name: 'python3', display_name: 'Python 3' } },
-        nbformat: 4,
-        nbformat_minor: 5,
-      },
-      format: 'json',
-      name: COPILOT_NOTEBOOK,
-      path: COPILOT_NOTEBOOK,
-    };
+    notebook = emptyCopilotNotebook();
   }
   const cell = {
     cell_type: 'code',
@@ -584,19 +708,7 @@ async function appendCellToCopilotNotebook(language: 'sql' | 'python', source: s
   notebook.name = COPILOT_NOTEBOOK;
   notebook.path = COPILOT_NOTEBOOK;
 
-  const put = await fetch(url, {
-    method: 'PUT',
-    headers,
-    credentials: 'omit',
-    body: JSON.stringify({
-      type: 'notebook',
-      format: 'json',
-      content: notebook.content,
-    }),
-  });
-  if (!put.ok) {
-    throw new Error(`Jupyter PUT failed: ${put.status}`);
-  }
+  await putCopilotNotebook(notebook.content);
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,11 +1128,7 @@ function CopilotPanel({
               {/* Code answers: show the prose around the code (if any), not
                  the code itself — the code lives in copilot.ipynb. Pure-text
                  answers ("스키마를 알려주세요" 등) are shown unchanged. */}
-              {narration && (
-                <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>
-                  {narration}
-                </Text>
-              )}
+              {narration && <Markdown>{narration}</Markdown>}
               {m.role === 'assistant' && blocks.length > 0 && (
                 <Group mt={6} gap="xs">
                   <Badge variant="outline" color="green" size="sm">
@@ -1055,7 +1163,7 @@ function CopilotPanel({
               <Loader size="xs" />
               <Badge size="xs" color="grape">코파일럿</Badge>
             </Group>
-            <Text size="sm" style={{ whiteSpace: 'pre-wrap' }}>{pending}</Text>
+            <Markdown>{pending}</Markdown>
           </Card>
         )}
       </div>
