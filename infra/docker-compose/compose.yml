@@ -135,7 +135,7 @@ services:
       - spa
       - spa-auditor
       - spa-analyst
-      - spa-viewer
+      - spa-platform
       - backend
       - jupyter
     ports:
@@ -197,15 +197,14 @@ services:
       - -c
       - npm install --no-fund --no-audit && exec npm run dev
 
-  spa-viewer:
+  spa-platform:
     image: node:20-alpine
     <<: *restart
     working_dir: /app
     environment:
       VITE_PROXY_TARGET: http://backend:8000
-      NODE_OPTIONS: --max-old-space-size=4096
     volumes:
-      - ../../units/admin-unit/viewer-portal:/app
+      - ../../units/admin-unit/platform-login:/app
       - /app/node_modules
     depends_on:
       - backend
