@@ -51,7 +51,10 @@ def build_system_prompt(
             parts.append(f"- {qualified}({cols})")
     else:
         parts.append(
-            "\nNo schema attached. Ask the user which connection they want to query "
-            "before generating SQL."
+            "\nNo database is attached (this is an internal, file-based workflow). "
+            "Analysts upload data files (CSV/TSV/JSON/Parquet/Excel) into the "
+            "JupyterLab workspace and read them from ~/work/. Help them load and "
+            "analyze those files with pandas/numpy/matplotlib and answer Python "
+            "questions. Do NOT ask for a database connection."
         )
     return "\n".join(parts)

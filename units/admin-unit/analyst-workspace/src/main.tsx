@@ -1320,11 +1320,9 @@ function CopilotPanel({
 }
 
 function JupyterWithCopilot() {
-  // Pick a default connection — the analyst likely wants sales_db context.
-  const conns = useQuery({ queryKey: ['conns'], queryFn: api.connections });
-  const defaultConn = conns.data?.find((c) => c.engine !== 'hive')?.connection_id ?? null;
-  const [connId, setConnId] = useState<string | null>(null);
-  const activeConn = connId ?? defaultConn;
+  // DB connections are intentionally gone — this is an internal-network,
+  // file-upload workflow (upload data files straight into JupyterLab). The
+  // copilot works without a connection (general Python/pandas help).
 
   // Collapsible + drag-resizable copilot panel.
   const [panelOpen, setPanelOpen] = useState(true);
@@ -1355,7 +1353,7 @@ function JupyterWithCopilot() {
   return (
     <div style={{ display: 'flex', height: '100%', width: '100%', position: 'relative' }}>
       <div style={{ flex: '1 1 auto', minWidth: 280, height: '100%' }}>
-        <JupyterLab connectionId={activeConn} />
+        <JupyterLab connectionId={null} />
       </div>
 
       {/* While dragging, this overlay sits above the iframe so the parent keeps
@@ -1389,16 +1387,7 @@ function JupyterWithCopilot() {
             }}
           >
             <Stack p={0} gap={0} style={{ height: '100%' }}>
-              <Group p="xs" gap="xs" align="center" wrap="nowrap" style={{ borderBottom: '1px solid #e9ecef' }}>
-                <Text size="xs" c="dimmed">커넥션</Text>
-                <Select
-                  size="xs"
-                  value={activeConn}
-                  data={(conns.data ?? []).map((c) => ({ value: c.connection_id, label: c.name }))}
-                  onChange={setConnId}
-                  placeholder="선택"
-                  style={{ flex: 1 }}
-                />
+              <Group p="xs" gap="xs" align="center" justify="flex-end" wrap="nowrap" style={{ borderBottom: '1px solid #e9ecef' }}>
                 <Button
                   size="xs"
                   variant="light"
@@ -1410,7 +1399,7 @@ function JupyterWithCopilot() {
                 </Button>
               </Group>
               <div style={{ flex: 1, minHeight: 0 }}>
-                <CopilotPanel connectionId={activeConn} />
+                <CopilotPanel connectionId={null} />
               </div>
             </Stack>
           </div>
