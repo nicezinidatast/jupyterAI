@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -7,6 +7,7 @@ import {
   Button,
   Code,
   Group,
+  Loader,
   MantineProvider,
   Select,
   Stack,
@@ -22,6 +23,44 @@ const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
 });
 
+// ---------------------------------------------------------------------------
+// Auth guard — checks /api/auth/me on mount; redirects to /platform/ on 401
+// or any network failure. Children are not rendered until the check resolves.
+// ---------------------------------------------------------------------------
+type AuthState = 'loading' | 'ok' | 'redirect';
+
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  const [authState, setAuthState] = useState<AuthState>('loading');
+
+  useEffect(() => {
+    fetch('/api/auth/me', { credentials: 'include' })
+      .then((r) => {
+        if (r.status === 401 || !r.ok) {
+          setAuthState('redirect');
+        } else {
+          setAuthState('ok');
+        }
+      })
+      .catch(() => setAuthState('redirect'));
+  }, []);
+
+  useEffect(() => {
+    if (authState === 'redirect') {
+      window.location.assign('/platform/');
+    }
+  }, [authState]);
+
+  if (authState === 'loading' || authState === 'redirect') {
+    return (
+      <Group justify="center" align="center" style={{ height: '100vh' }}>
+        <Loader />
+      </Group>
+    );
+  }
+
+  return <>{children}</>;
+}
+
 type AuditEvent = {
   id: number;
   occurred_at: string;
@@ -34,13 +73,13 @@ type AuditEvent = {
 };
 
 async function fetchEvents(params: URLSearchParams): Promise<{ items: AuditEvent[]; count: number }> {
-  const res = await fetch(`/api/audit?${params.toString()}`);
+  const res = await fetch(`/api/audit?${params.toString()}`, { credentials: 'include' });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
 
 async function fetchEventTypes(): Promise<string[]> {
-  const res = await fetch('/api/audit/event-types');
+  const res = await fetch('/api/audit/event-types', { credentials: 'include' });
   if (!res.ok) return [];
   return res.json();
 }
@@ -171,8 +210,10 @@ function App() {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <MantineProvider>
-    <QueryClientProvider client={queryClient}>
-      <App />
-    </QueryClientProvider>
+    <RequireAuth>
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </RequireAuth>
   </MantineProvider>
 );

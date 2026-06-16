@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
-import { AppShell, Burger, Group, MantineProvider, NavLink, Text, Title } from '@mantine/core';
+import { AppShell, Burger, Group, Loader, MantineProvider, NavLink, Text, Title } from '@mantine/core';
 import { useDisclosure } from '@mantine/hooks';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
@@ -21,6 +21,46 @@ import { Backups } from './pages/Backups';
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false } },
 });
+
+// ---------------------------------------------------------------------------
+// Auth guard — checks /api/auth/me on mount; redirects to /platform/ on 401
+// or any network failure. Children are not rendered until the check resolves.
+// ---------------------------------------------------------------------------
+type AuthState = 'loading' | 'ok' | 'redirect';
+
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  const [authState, setAuthState] = useState<AuthState>('loading');
+
+  useEffect(() => {
+    fetch('/api/auth/me', { credentials: 'include' })
+      .then((r) => {
+        if (r.status === 401) {
+          setAuthState('redirect');
+        } else if (!r.ok) {
+          setAuthState('redirect');
+        } else {
+          setAuthState('ok');
+        }
+      })
+      .catch(() => setAuthState('redirect'));
+  }, []);
+
+  useEffect(() => {
+    if (authState === 'redirect') {
+      window.location.assign('/platform/');
+    }
+  }, [authState]);
+
+  if (authState === 'loading' || authState === 'redirect') {
+    return (
+      <Group justify="center" align="center" style={{ height: '100vh' }}>
+        <Loader />
+      </Group>
+    );
+  }
+
+  return <>{children}</>;
+}
 
 const NAV = [
   { to: '/', label: '대시보드', emoji: '📊' },
@@ -83,11 +123,13 @@ function Shell() {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <MantineProvider defaultColorScheme="light">
-      <QueryClientProvider client={queryClient}>
-        <BrowserRouter basename="/admin">
-          <Shell />
-        </BrowserRouter>
-      </QueryClientProvider>
+      <RequireAuth>
+        <QueryClientProvider client={queryClient}>
+          <BrowserRouter basename="/admin">
+            <Shell />
+          </BrowserRouter>
+        </QueryClientProvider>
+      </RequireAuth>
     </MantineProvider>
   </React.StrictMode>
 );

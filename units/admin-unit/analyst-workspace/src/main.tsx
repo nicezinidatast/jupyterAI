@@ -94,7 +94,16 @@ type Me = {
 };
 
 const api = {
-  me: () => fetch('/api/auth/me').then((r) => r.json() as Promise<Me>),
+  me: () =>
+    fetch('/api/auth/me', { credentials: 'include' }).then((r) => {
+      if (r.status === 401) {
+        window.location.assign('/platform/');
+        // Return a promise that never resolves so the app stops rendering.
+        return new Promise<Me>(() => {});
+      }
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.json() as Promise<Me>;
+    }),
   connections: () => fetch('/api/connections').then((r) => r.json() as Promise<Connection[]>),
   schema: (id: string) =>
     fetch(`/api/connections/${id}/schema`).then((r) => r.json() as Promise<Schema>),
@@ -1247,6 +1256,25 @@ function Shell() {
   const [navOpen, setNavOpen] = useState(false);
   const navCollapsed = isJupyter && !navOpen;
 
+  // Show a lightweight loader while the auth check is in flight.
+  // api.me() redirects to /platform/ on 401, so we only render the app
+  // once we have confirmed the session is valid.
+  if (me.isLoading || me.isError) {
+    return (
+      <Group justify="center" align="center" style={{ height: '100vh' }}>
+        <Loader />
+      </Group>
+    );
+  }
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } finally {
+      window.location.assign('/platform/');
+    }
+  };
+
   return (
     <AppShell
       header={{ height: 44 }}
@@ -1274,6 +1302,9 @@ function Shell() {
               {me.data.roles.map((r) => (
                 <Badge key={r} variant="light">{r}</Badge>
               ))}
+              <Button size="xs" variant="subtle" color="gray" onClick={handleLogout}>
+                로그아웃
+              </Button>
             </Group>
           )}
         </Group>
