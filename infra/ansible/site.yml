@@ -1,0 +1,41 @@
+---
+# Minimal Ansible playbook used to install Docker + compose on target VMs and
+# then bring up the dataplatform stack. The real production playbook will be
+# tailored to the company's preferred base image.
+
+- name: Provision dataplatform host
+  hosts: dataplatform
+  become: true
+  tasks:
+    - name: Install Docker + Compose plugin
+      ansible.builtin.package:
+        name:
+          - docker.io
+          - docker-compose-plugin
+        state: present
+
+    - name: Ensure docker is running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Sync platform repo
+      ansible.builtin.git:
+        repo: "{{ platform_repo }}"
+        dest: /opt/dataplatform
+        version: "{{ platform_ref | default('main') }}"
+
+    - name: Copy .env from secrets
+      ansible.builtin.copy:
+        src: secrets/dataplatform.env
+        dest: /opt/dataplatform/infra/docker-compose/.env
+        mode: '0600'
+        owner: root
+        group: root
+
+    - name: Compose up
+      community.docker.docker_compose_v2:
+        project_src: /opt/dataplatform/infra/docker-compose
+        state: present
+        pull: missing

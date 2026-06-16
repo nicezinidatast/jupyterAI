@@ -1,0 +1,96 @@
+# Ralph Progress Log
+
+## Iteration 1 (2026-05-21) — COMPLETED
+Code skeleton round, 15/15 stories. See `prd-archive/round-1.json` for full archive.
+
+Patterns established (still in effect):
+- Every domain function returns Result[T, DomainError]
+- Secret brand prevents incidental plaintext leakage
+- DomainEvent.make_event() refuses Secret values
+- All external systems wrapped by an Adapter Protocol
+- ORM uses JSONB().with_variant(Text(), 'sqlite') for test compatibility
+- WORM trigger on audit_log enforces append-only
+- Outbox pattern for audit + git-commit
+- FastAPI middlewares: SecurityHeaders → RequestId → RateLimit → AccessLog
+
+---
+
+## Iteration 2 (2026-05-22) — CODE COMPLETE; live verification stalled by Docker
+
+### What landed (12/12 stories code-complete)
+- RPS-01 demo-postgres + demo-mysql containers (host 5434 / 3308) + init.sql seeds (1500+5000+50+1500+100 rows) — **live verified**
+- RPS-02 real asyncpg + aiomysql connectors; `_fake_rows()` / `_FAKE_SCHEMA` deleted — **live verified** (SELECT customers LIMIT 5 + JOIN aggregate)
+- RPS-03 information_schema introspection with PII kind annotations — **live verified** (sales_db customers/orders/products, crm leads/campaigns)
+- RPS-04 POST /api/admin/connections/{id}/test with real ping + Admin Console button + green/red latency badge — **live verified** (ok=22ms, no-creds case)
+- RPS-05 LocalKmsAdapter (Fernet) + SecretsStorage table + lifespan key bootstrap + seed.py refactor — **live verified** (ciphertext in DB, plaintext absent, decrypted query 29ms)
+- RPS-06 /api/files/upload + shared uploads-data volume + magic-byte sniff + FileUploadCard SPA widget — **live verified** (CSV uploaded, pandas readback in jupyter container)
+- RPS-07 copilot-unit (Anthropic + Ollama providers, factory, prompts) — **live verified** (in-container smoke: provider name, schema-only prompt)
+- RPS-08 ollama + ollama-init in compose under profile=llm + backend env vars — **config validated** (`docker compose config --profiles` lists 'llm'); model pull deferred to user
+- RPS-09 /api/copilot/chat NDJSON streaming endpoint + audit row + PII response masking — **code complete; live blocked by Docker daemon stall**
+- RPS-10 Analyst Workspace split view (CopilotPanel + JupyterWithCopilot, NDJSON streaming, provider badge) — **code complete; live blocked**
+- RPS-11 appendCellToCopilotNotebook helper using Jupyter Contents REST API + per-block 셀로 삽입 buttons — **code complete; live blocked**
+- RPS-12 tests/e2e/test_full_flow.py with 4 scenarios — **test file committed; pytest run blocked by Docker**
+
+### Live blocker
+Docker Desktop daemon stalled mid-`ollama/ollama:latest` image pull (~500MB). API now returns 500 Internal Server Error for /containers/json. `Restart-Service com.docker.service` denied. **Manual Docker Desktop restart required to resume verification.**
+
+### Patterns added this round
+- `data.connectors.factory.open_runtime_connector(spec, username=, password=)` — engine-specific real driver returns; keep `create_connector` for legacy Secret-based path
+- `credential.adapters.local_kms.LocalKmsAdapter` — Fernet at-rest, DB-backed, conforms to VaultAdapter Protocol; used as a drop-in for HvacVaultAdapter in closed-network deployments
+- `_resolve_credentials(conn, session, vault)` helper in data-unit & admin-unit `/test` to keep the vault flow consistent
+- Backend lifespan owns the single vault adapter instance via app.state.vault_adapter
+- LLM provider abstraction with env-driven dispatch (`LLM_PROVIDER=ollama|anthropic`)
+- NDJSON streaming response pattern for /api/copilot/chat — Fetch ReadableStream on the client, line-delimited JSON chunks {chunk:"…"} or {error:"…"}
+- Post-stream audit row insertion with row_data_transmitted=false (FR-LLM-05 guarantee)
+
+### Out of scope for this round (intentional)
+- Keycloak OIDC real wire-up (still stub)
+- JupyterHub per-user spawner (single shared jupyter container)
+- Kerberos for Hive/Impala
+- Oracle / MSSQL drivers (only PG + MySQL drivers built)
+- Streaming the LLM model pull as part of the round (user runs `--profile llm up` manually)
+
+### Resumption notes
+1. Restart Docker Desktop manually (user action).
+2. `cd infra/docker-compose && docker compose up -d` to bring back the demo stack.
+3. Optional: `docker compose --profile llm up -d ollama ollama-init` to pull qwen2.5-coder:7b (~4.7GB one-time).
+4. Smoke RPS-09: `curl -N -X POST http://localhost:8081/api/copilot/chat -H 'Content-Type: application/json' -d '{"question":"테스트", "connection_id":"<sales_db_uuid>"}'`
+5. e2e: `pytest tests/e2e -v`
+
+## Iteration 2 (2026-05-22) — CODE COMPLETE — original WIP block follows
+
+### Context
+Round 1 finished code skeleton. User exercised the running stack and surfaced two structural issues:
+
+1. **자연어 분석 어시스턴트가 본질** — JupyterLab 임베드/거버넌스는 토대에 불과. 코파일럿이 빠지면 핵심 미구현. (memory: project_core_concept)
+2. **실제 운영 가능해야 함** — `_fake_rows()` / `_FAKE_SCHEMA` / 평문 password / mock test-connection 같은 stub으로 핵심 경로를 가리면 안 됨. (memory: feedback_real_not_demo)
+
+Phase 정렬상 LLM은 Phase 2지만 user가 본질로 강조 → Wave 1(진짜 데이터 연결)과 Wave 3(LLM 코파일럿)을 의존성 순서로 인터리브한 단일 PRD로 진행.
+
+### Known gaps to fix (this round)
+- `units/data-unit/src/data/api/router.py`의 `_fake_rows()` / `_FAKE_SCHEMA` 제거
+- 평문 password 컬럼 → Fernet 암호화 (Vault-ready 인터페이스)
+- 실 DB 드라이버 (asyncpg / aiomysql)
+- demo-postgres / demo-mysql 컨테이너 + 진짜 스키마/시드 (1000+ 행)
+- "테스트 연결" 실 ping
+- 파일 업로드 (CSV/Excel/Parquet/JSON, 1GB)
+- copilot-unit 신규 (provider abstraction: Anthropic + Ollama)
+- Ollama 컨테이너 (profile=llm opt-in)
+- /api/copilot/chat streaming endpoint + 스키마 컨텍스트 + audit + PII 검사
+- Analyst Workspace 분할 화면 (JupyterLab + CopilotPanel)
+- 셀 삽입 (Jupyter REST API)
+- e2e 회귀 테스트
+
+### Out of scope (this round)
+- Keycloak 실 OIDC (별도 라운드)
+- JupyterHub spawner (단일 jupyter 유지)
+- Kerberos for Hive/Impala (Phase 2)
+- Oracle / MSSQL 드라이버 (demo는 PG/MySQL만)
+
+### Operating constraints
+- 단일 진입점 5180 portal 유지
+- HMR 동작 유지 (Vite + uvicorn --reload)
+- 기존 PBT / 유닛 테스트 0개 회귀
+- audit outbox 흐름 유지
+- LLM provider 환경변수 스위치: LLM_PROVIDER (anthropic|ollama)
+- ANTHROPIC_API_KEY / OLLAMA_BASE_URL 환경변수 주입

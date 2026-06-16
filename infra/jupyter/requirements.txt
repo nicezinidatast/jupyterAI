@@ -1,0 +1,7 @@
+jupysql==0.10.16
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+pymysql==1.1.1
+plotly==5.24.1
+pyarrow==18.0.0
+openpyxl==3.1.5

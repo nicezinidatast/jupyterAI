@@ -1,0 +1,391 @@
+name: dataplatform-0521
+
+# Live-reload demo stack:
+#   - backend: source mount + uvicorn --reload (.py 저장 시 자동 재시작)
+#   - SPA × 4: Vite dev server in container + source mount (HMR — .tsx 저장 시 즉시 반영)
+#   - Postgres / Redis / JupyterLab: 그대로
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16
+    <<: *restart
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dataplatform}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    <<: *restart
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-redis}", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD:-redis} ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    # Image already contains the installed wheels; host source is bind-mounted
+    # over the same package paths. uvicorn no longer auto-reloads on every
+    # save (mid-edit reloads cause noise during batched changes) — restart
+    # explicitly with `docker compose restart backend` when work is done.
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    <<: *restart
+    env_file:
+      - ../../backend/.env
+    environment:
+      BACKEND_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-dataplatform}
+      BACKEND_REDIS_URL: redis://:${REDIS_PASSWORD:-redis}@redis:6379/0
+      BACKEND_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Stable Fernet key for local-KMS vault adapter. Demo default is a fixed
+      # 32-byte url-safe base64 string so restarts can still decrypt the
+      # ciphertext seeded on first boot. Production injects via secrets manager.
+      BACKEND_CREDENTIAL_KEY: ${BACKEND_CREDENTIAL_KEY:-KbhP6uONwhnJDuYcXvi_BZxiImf_venYe_6eI4kCbvI=}
+      # Prepend host-mounted source to PYTHONPATH so live edits win over the
+      # installed wheels.
+      PYTHONPATH: /src/shared-lib:/src/auth:/src/audit:/src/credential:/src/data:/src/notebook:/src/admin-backend:/src/copilot:/src/backend
+      # WATCHFILES_FORCE_POLLING is no-op with --reload removed; kept here
+      # so re-enabling --reload doesn't require touching env config.
+      WATCHFILES_FORCE_POLLING: "true"
+      # LLM copilot: per-provider knobs. The actual provider/key come from
+      # backend/.env via env_file above (LLM_PROVIDER, ANTHROPIC_API_KEY).
+      # Defining them here would override env_file at compose level.
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:7b}
+      # OIDC — defaults to off so the SPA boots without Keycloak. Set to
+      # 'true' (plus bring up the keycloak service) to require real bearer
+      # tokens. Issuer is pinned to the docker-network hostname so tokens
+      # validate regardless of which host port the caller used.
+      BACKEND_OIDC_ENABLED: ${BACKEND_OIDC_ENABLED:-false}
+      BACKEND_OIDC_ISSUER: ${BACKEND_OIDC_ISSUER:-http://keycloak:8080/realms/dataplatform}
+      BACKEND_OIDC_AUDIENCE: ${BACKEND_OIDC_AUDIENCE:-}
+    volumes:
+      - ../../units/shared-lib/src:/src/shared-lib:ro
+      - ../../units/auth-unit/src:/src/auth:ro
+      - ../../units/audit-unit/src:/src/audit:ro
+      - ../../units/credential-unit/src:/src/credential:ro
+      - ../../units/data-unit/src:/src/data:ro
+      - ../../units/notebook-unit/src:/src/notebook:ro
+      - ../../units/admin-unit/backend/src:/src/admin-backend:ro
+      - ../../units/copilot-unit/src:/src/copilot:ro
+      - ../../backend/src:/src/backend:ro
+      - uploads-data:/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      demo-postgres:
+        condition: service_healthy
+      demo-mysql:
+        condition: service_healthy
+    ports:
+      - "8081:8000"
+    command:
+      - uvicorn
+      - backend.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: units/gateway-unit/Dockerfile
+    <<: *restart
+    environment:
+      GATEWAY_BACKEND_URL: http://backend:8000
+      GATEWAY_REDIS_URL: redis://:${REDIS_PASSWORD:-redis}@redis:6379/0
+      GATEWAY_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      - backend
+      - redis
+    ports:
+      - "8443:8080"
+
+  # Each SPA runs Vite's dev server inside the container.  Source is bind-
+  # mounted from the host; node_modules lives in an anonymous volume so the
+  # host's Windows filesystem doesn't ruin alpine ABI.
+  # Single public entrypoint — see infra/portal/nginx.conf.
+  portal:
+    image: nginx:alpine
+    <<: *restart
+    volumes:
+      - ../portal/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../portal/index.html:/usr/share/nginx/html/index.html:ro
+    depends_on:
+      - spa
+      - spa-auditor
+      - spa-analyst
+      - spa-viewer
+      - backend
+      - jupyter
+    ports:
+      - "5180:80"
+
+  # Each SPA is now internal-only — accessed via the portal.
+  spa:
+    image: node:20-alpine
+    <<: *restart
+    working_dir: /app
+    environment:
+      VITE_PROXY_TARGET: http://backend:8000
+    volumes:
+      - ../../units/admin-unit/admin-console:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    expose:
+      - "80"
+    command:
+      - sh
+      - -c
+      - npm install --no-fund --no-audit && exec npm run dev
+
+  spa-auditor:
+    image: node:20-alpine
+    <<: *restart
+    working_dir: /app
+    environment:
+      VITE_PROXY_TARGET: http://backend:8000
+    volumes:
+      - ../../units/admin-unit/auditor-console:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    expose:
+      - "80"
+    command:
+      - sh
+      - -c
+      - npm install --no-fund --no-audit && exec npm run dev
+
+  spa-analyst:
+    image: node:20-alpine
+    <<: *restart
+    working_dir: /app
+    environment:
+      VITE_PROXY_TARGET: http://backend:8000
+      NODE_OPTIONS: --max-old-space-size=4096
+    volumes:
+      - ../../units/admin-unit/analyst-workspace:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    expose:
+      - "80"
+    command:
+      - sh
+      - -c
+      - npm install --no-fund --no-audit && exec npm run dev
+
+  spa-viewer:
+    image: node:20-alpine
+    <<: *restart
+    working_dir: /app
+    environment:
+      VITE_PROXY_TARGET: http://backend:8000
+      NODE_OPTIONS: --max-old-space-size=4096
+    volumes:
+      - ../../units/admin-unit/viewer-portal:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    expose:
+      - "80"
+    command:
+      - sh
+      - -c
+      - npm install --no-fund --no-audit && exec npm run dev
+
+  # Keycloak — single sign-on for the closed-network deployment.
+  # `start-dev --import-realm` is fine for the in-network demo: H2 file backend,
+  # admin/admin master credentials, dataplatform realm preloaded with 5 users
+  # whose emails match backend/seed.py (so DB role lookup just works).
+  # We pin KC_HOSTNAME=keycloak so issued tokens always carry
+  # iss=http://keycloak:8080/realms/dataplatform regardless of which host port
+  # the caller hits — backend validates against that exact string.
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    <<: *restart
+    command:
+      - start-dev
+      - --import-realm
+      - --hostname=keycloak
+      - --hostname-strict=false
+      - --hostname-strict-backchannel=false
+      - --http-port=8080
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ../keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+      - keycloak-data:/opt/keycloak/data
+    ports:
+      - "8090:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && cat <&3 | head -1 | grep -q '200'"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+
+  jupyter:
+    # Custom image: scipy-notebook + jupysql + plotly + DB drivers + startup
+    # script that pre-registers `sales_engine` / `crm_engine` and binds %%sql.
+    # See infra/jupyter/{Dockerfile,requirements.txt,startup/00-platform.py}.
+    build:
+      context: ../jupyter
+      dockerfile: Dockerfile
+    <<: *restart
+    command:
+      - start-notebook.py
+      - --ServerApp.token=dataplatform
+      - --ServerApp.password=
+      - --ServerApp.allow_origin=*
+      - --ServerApp.disable_check_xsrf=True
+      - --ServerApp.tornado_settings={"headers":{"Content-Security-Policy":"frame-ancestors *"}}
+      - --ServerApp.base_url=/jupyter/
+      # Expose `window.jupyterapp` inside the Lab page so the SPA (same
+      # origin via the portal) can target the *active* notebook for copilot
+      # cell insertion instead of always writing to copilot.ipynb.
+      - --LabApp.expose_app_in_browser=True
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      # DSNs for the auto-registered SQLAlchemy engines. Hostnames are the
+      # docker-network service names — the same ones the backend uses.
+      DATAPLATFORM_SALES_DSN: postgresql+psycopg2://demo:demo@demo-postgres:5432/sales
+      DATAPLATFORM_CRM_DSN: mysql+pymysql://demo:demo@demo-mysql:3306/crm
+    depends_on:
+      demo-postgres:
+        condition: service_healthy
+      demo-mysql:
+        condition: service_healthy
+    ports:
+      - "8888:8888"
+    volumes:
+      - jupyter-data:/home/jovyan/work
+      - uploads-data:/home/jovyan/work/uploads
+
+  # ────────────────────────────────────────────────────────────────────
+  # Demo data sources — real DB containers that the platform connects to
+  # as the "sales_db" and "crm_mysql" Connections. The init.sql scripts
+  # provide ≥1000-row realistic-shape datasets so the analyst sees real
+  # rows (no fake_rows()) when running queries.
+  # ────────────────────────────────────────────────────────────────────
+  demo-postgres:
+    image: postgres:16
+    <<: *restart
+    environment:
+      POSTGRES_DB: sales
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+    volumes:
+      - demo-postgres-data:/var/lib/postgresql/data
+      - ../demo-data/postgres:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d sales"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  demo-mysql:
+    image: mysql:8.0
+    <<: *restart
+    environment:
+      MYSQL_ROOT_PASSWORD: demoroot
+      MYSQL_DATABASE: crm
+      MYSQL_USER: demo
+      MYSQL_PASSWORD: demo
+    volumes:
+      - demo-mysql-data:/var/lib/mysql
+      - ../demo-data/mysql:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "3308:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -uroot -pdemoroot --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # ────────────────────────────────────────────────────────────────────
+  # Local LLM (opt-in: `docker compose --profile llm up -d`).
+  # Pulls a 7B code-specialised model so the analyst copilot can run
+  # entirely inside the closed network. CPU works; GPU recommended.
+  # ────────────────────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    <<: *restart
+    profiles: ["llm"]
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # One-shot model pull. Idempotent: re-running just confirms the model is
+  # already present. Tag the model via OLLAMA_MODEL (default qwen2.5-coder:7b).
+  ollama-init:
+    image: ollama/ollama:latest
+    profiles: ["llm"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:7b}
+    entrypoint:
+      - sh
+      - -c
+      - 'ollama pull "$$OLLAMA_MODEL" && echo "model ready: $$OLLAMA_MODEL"'
+    restart: "no"
+
+  jupyterhub:
+    build:
+      context: ../jupyterhub
+      dockerfile: Dockerfile
+    <<: *restart
+    profiles: ["full"]
+    environment:
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      - backend
+    ports:
+      - "8001:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+volumes:
+  postgres-data:
+  redis-data:
+  jupyter-data:
+  demo-postgres-data:
+  demo-mysql-data:
+  uploads-data:
+  ollama-data:
+  keycloak-data:

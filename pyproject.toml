@@ -1,0 +1,62 @@
+# Workspace root — used by uv to orchestrate per-unit builds.
+# Each unit has its own pyproject.toml; this root file only declares the workspace.
+
+[tool.uv.workspace]
+members = [
+    "units/shared-lib",
+    "units/gateway-unit",
+    "units/auth-unit",
+    "units/audit-unit",
+    "units/credential-unit",
+    "units/data-unit",
+    "units/notebook-unit",
+    "units/admin-unit/backend",
+    "backend",
+]
+
+[tool.uv.sources]
+dataplatform-shared = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    "**/migrations/versions/*",
+    "phase2-incubation/**",
+]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle / pyflakes
+    "I",             # isort
+    "B",             # bugbear
+    "S",             # bandit-style security
+    "UP",            # pyupgrade
+    "RUF",           # ruff-specific
+]
+ignore = [
+    "E501",          # line length: handled by formatter
+    "S101",          # asserts allowed in tests
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106", "S107"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+exclude = ["migrations/", "tests/fixtures/"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+markers = [
+    "property: property-based tests via Hypothesis",
+    "integration: cross-unit integration tests",
+    "performance: load/perf tests via Locust",
+    "copilot: tests that spend an Anthropic round-trip",
+    "oidc: tests that require the keycloak container",
+]
+addopts = "-ra --strict-markers"

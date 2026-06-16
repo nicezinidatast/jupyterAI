@@ -1,0 +1,22 @@
+# Dev override — exposes ports, mounts source for hot reload.
+name: dataplatform
+
+services:
+  backend:
+    volumes:
+      - ../../units:/app/units:ro
+      - ../../backend/src:/app/src/backend:ro
+    environment:
+      BACKEND_LOG_LEVEL: DEBUG
+    command:
+      - uvicorn
+      - backend.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+
+  gateway:
+    environment:
+      GATEWAY_LOG_LEVEL: DEBUG

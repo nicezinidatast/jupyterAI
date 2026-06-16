@@ -1,0 +1,88 @@
+{
+  "realm": "dataplatform",
+  "enabled": true,
+  "accessTokenLifespan": 1800,
+  "ssoSessionIdleTimeout": 3600,
+  "ssoSessionMaxLifespan": 36000,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "roles": {
+    "realm": [
+      {"name": "Admin",   "description": "Platform administrator"},
+      {"name": "Analyst", "description": "Data analyst"},
+      {"name": "Auditor", "description": "Audit-log read-only"},
+      {"name": "Viewer",  "description": "Read-only viewer"}
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "dataplatform-spa",
+      "name": "dataplatform SPA + headless test client",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["*"],
+      "webOrigins": ["*"],
+      "protocol": "openid-connect",
+      "attributes": {
+        "access.token.lifespan": "1800"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "admin@example.test",
+      "email": "admin@example.test",
+      "firstName": "Park",
+      "lastName": "Min-jun",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [{"type": "password", "value": "admin", "temporary": false}],
+      "realmRoles": ["Admin"]
+    },
+    {
+      "username": "alice.kim@example.test",
+      "email": "alice.kim@example.test",
+      "firstName": "Alice",
+      "lastName": "Kim",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [{"type": "password", "value": "analyst", "temporary": false}],
+      "realmRoles": ["Analyst"]
+    },
+    {
+      "username": "bob.lee@example.test",
+      "email": "bob.lee@example.test",
+      "firstName": "Bob",
+      "lastName": "Lee",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [{"type": "password", "value": "analyst", "temporary": false}],
+      "realmRoles": ["Analyst"]
+    },
+    {
+      "username": "viewer@example.test",
+      "email": "viewer@example.test",
+      "firstName": "Choi",
+      "lastName": "Ji-hye",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [{"type": "password", "value": "viewer", "temporary": false}],
+      "realmRoles": ["Viewer"]
+    },
+    {
+      "username": "auditor@example.test",
+      "email": "auditor@example.test",
+      "firstName": "Lee",
+      "lastName": "Sung-ho",
+      "emailVerified": true,
+      "enabled": true,
+      "credentials": [{"type": "password", "value": "auditor", "temporary": false}],
+      "realmRoles": ["Auditor"]
+    }
+  ]
+}
