@@ -72,5 +72,5 @@ infra/trivy/
 Thumbs.db
 
 # AI-DLC working
-.omc/state/sessions/
+.omc/state/
 .omc/notepad.md
