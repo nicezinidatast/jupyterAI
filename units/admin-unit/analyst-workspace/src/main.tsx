@@ -97,7 +97,7 @@ const api = {
   me: () =>
     fetch('/api/auth/me', { credentials: 'include' }).then((r) => {
       if (r.status === 401) {
-        window.location.assign('/platform/');
+        window.location.assign('/login/');
         // Return a promise that never resolves so the app stops rendering.
         return new Promise<Me>(() => {});
       }
@@ -1257,7 +1257,7 @@ function Shell() {
   const navCollapsed = isJupyter && !navOpen;
 
   // Show a lightweight loader while the auth check is in flight.
-  // api.me() redirects to /platform/ on 401, so we only render the app
+  // api.me() redirects to /login/ on 401, so we only render the app
   // once we have confirmed the session is valid.
   if (me.isLoading || me.isError) {
     return (
@@ -1271,7 +1271,7 @@ function Shell() {
     try {
       await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
     } finally {
-      window.location.assign('/platform/');
+      window.location.assign('/login/');
     }
   };
 

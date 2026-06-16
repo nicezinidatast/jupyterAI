@@ -5,7 +5,7 @@ const proxyTarget = process.env.VITE_PROXY_TARGET ?? 'http://localhost:8081';
 
 export default defineConfig({
   plugins: [react()],
-  base: '/platform/',
+  base: '/login/',
   server: {
     host: true,
     port: 80,

@@ -23,7 +23,7 @@ const queryClient = new QueryClient({
 });
 
 // ---------------------------------------------------------------------------
-// Auth guard — checks /api/auth/me on mount; redirects to /platform/ on 401
+// Auth guard — checks /api/auth/me on mount; redirects to /login/ on 401
 // or any network failure. Children are not rendered until the check resolves.
 // ---------------------------------------------------------------------------
 type AuthState = 'loading' | 'ok' | 'redirect';
@@ -47,7 +47,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (authState === 'redirect') {
-      window.location.assign('/platform/');
+      window.location.assign('/login/');
     }
   }, [authState]);
 
