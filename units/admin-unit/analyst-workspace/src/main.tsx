@@ -577,7 +577,7 @@ function JupyterLab({ connectionId }: { connectionId: string | null }) {
 
   return (
     <iframe
-      src="/jupyter/lab?token=dataplatform"
+      src="/jupyter/lab?token=dataplatform&reset"
       title="JupyterLab"
       onLoad={() => setLoading(false)}
       style={{
@@ -734,9 +734,18 @@ function openCellEditBar(cell: any, connectionId: string | null): void {
   bar.className = 'zini-edit-bar';
   Object.assign(bar.style, {
     display: 'flex', gap: '6px', alignItems: 'center',
-    padding: '6px 10px', margin: '2px 12px 8px',
+    padding: '6px 10px',
+    marginTop: '2px', marginRight: '12px', marginBottom: '8px',
     background: '#f3f0ff', border: '1px solid #d0bfff', borderRadius: '6px',
   } as Partial<CSSStyleDeclaration>);
+  // Align the bar's left edge with the gray code editor (past the In[] gutter),
+  // not the cell's left edge.
+  const editorEl = (node.querySelector('.jp-InputArea-editor')
+    || node.querySelector('.cm-editor')) as HTMLElement | null;
+  const leftOffset = editorEl
+    ? Math.max(0, Math.round(editorEl.getBoundingClientRect().left - node.getBoundingClientRect().left))
+    : 64;
+  bar.style.marginLeft = `${leftOffset}px`;
   const input = doc.createElement('input');
   input.type = 'text';
   input.placeholder = '이 셀을 어떻게 고칠까요? (예: 에러 처리 추가) — Enter 적용, Esc 취소';
@@ -824,7 +833,8 @@ function injectCellButtons(connectionId: string | null): void {
       e.stopPropagation();
       openCellEditBar(cell, connectionId);
     });
-    toolbar.appendChild(btn);
+    // Put it at the FRONT of the toolbar (before duplicate/move/delete).
+    toolbar.insertBefore(btn, toolbar.firstChild);
   }
 }
 
@@ -1381,11 +1391,10 @@ function JupyterWithCopilot() {
                   size="xs"
                   variant="light"
                   color="grape"
-                  px={10}
                   onClick={() => setPanelOpen(false)}
-                  title="패널 접기"
+                  title="패널 숨기기"
                 >
-                  <span style={{ fontSize: 18, fontWeight: 800, lineHeight: 1 }}>›</span>
+                  숨기기
                 </Button>
               </Group>
               <div style={{ flex: 1, minHeight: 0 }}>
