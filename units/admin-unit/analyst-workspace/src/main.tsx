@@ -553,29 +553,31 @@ function Markdown({ children }: { children: string }) {
   );
 }
 
-function JupyterLab({ reloadToken }: { reloadToken: number }) {
-  // Land on the JupyterLab HOME (not a specific notebook) so the workspace
-  // opens cleanly even when copilot.ipynb does not exist — on first entry or
-  // after the user deletes it. The copilot creates copilot.ipynb on demand when
-  // it inserts the first cell and bumps `reloadToken`; only then do we open the
-  // notebook so the freshly-inserted cell is visible. (JupyterLab does not
-  // auto-refresh on external file changes, hence the iframe re-mount.)
-  //
-  // While the new iframe is loading we fade the contents for a smooth
-  // transition instead of a hard white flash.
+function JupyterLab({ connectionId }: { connectionId: string | null }) {
+  // Land on the JupyterLab HOME. The copilot opens copilot.ipynb in-app on the
+  // first insert (no iframe reload), so the embed never refreshes under the
+  // user. We only fade in once, on the initial load.
   const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    setLoading(true);
-  }, [reloadToken]);
 
-  const src =
-    reloadToken > 0
-      ? `/jupyter/lab/tree/copilot.ipynb?token=dataplatform&reset&t=${reloadToken}`
-      : `/jupyter/lab?token=dataplatform`;
+  // Keep the latest connection id available to the long-lived injector.
+  const connRef = useRef(connectionId);
+  connRef.current = connectionId;
+  // Inject the per-cell "✨ AI" edit button into the embedded notebook. Polling
+  // self-heals across JupyterLab re-renders and when a notebook is opened.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      try {
+        injectCellButtons(connRef.current);
+      } catch {
+        /* Lab not ready / no notebook open yet */
+      }
+    }, 1200);
+    return () => window.clearInterval(id);
+  }, []);
+
   return (
     <iframe
-      key={reloadToken}
-      src={src}
+      src="/jupyter/lab?token=dataplatform"
       title="JupyterLab"
       onLoad={() => setLoading(false)}
       style={{
@@ -712,6 +714,120 @@ function isNotebookPanel(w: any): boolean {
 //      can be empty when the iframe never received browser focus)
 //   3. the first open notebook in the main area (e.g. Launcher tab focused)
 //   4. null → caller falls back to the REST copilot.ipynb path
+// ---------------------------------------------------------------------------
+// Per-cell AI edit — Colab-style. We inject a "✨" icon into each code cell's
+// native cell toolbar (next to the duplicate / move / delete icons), reached
+// via the same-origin iframe + JupyterLab app handle. Clicking it opens an
+// inline edit bar UNDER the cell; applying calls /api/copilot/edit-cell and
+// replaces the cell's source live (no reload). A polling caller re-runs this
+// so it self-heals across Lab re-renders.
+// ---------------------------------------------------------------------------
+function openCellEditBar(cell: any, connectionId: string | null): void {
+  const node: HTMLElement = cell.node;
+  const doc = node.ownerDocument;
+  const existing = node.querySelector('.zini-edit-bar') as HTMLElement | null;
+  if (existing) {
+    (existing.querySelector('input') as HTMLInputElement | null)?.focus();
+    return;
+  }
+  const bar = doc.createElement('div');
+  bar.className = 'zini-edit-bar';
+  Object.assign(bar.style, {
+    display: 'flex', gap: '6px', alignItems: 'center',
+    padding: '6px 10px', margin: '2px 12px 8px',
+    background: '#f3f0ff', border: '1px solid #d0bfff', borderRadius: '6px',
+  } as Partial<CSSStyleDeclaration>);
+  const input = doc.createElement('input');
+  input.type = 'text';
+  input.placeholder = '이 셀을 어떻게 고칠까요? (예: 에러 처리 추가) — Enter 적용, Esc 취소';
+  Object.assign(input.style, {
+    flex: '1', fontSize: '12px', padding: '4px 6px',
+    border: '1px solid #b197fc', borderRadius: '4px',
+  } as Partial<CSSStyleDeclaration>);
+  const apply = doc.createElement('button');
+  apply.type = 'button'; apply.textContent = '적용';
+  Object.assign(apply.style, {
+    fontSize: '12px', padding: '4px 10px', cursor: 'pointer', color: '#fff',
+    background: '#7048e8', border: 'none', borderRadius: '4px',
+  } as Partial<CSSStyleDeclaration>);
+  const cancel = doc.createElement('button');
+  cancel.type = 'button'; cancel.textContent = '취소';
+  Object.assign(cancel.style, {
+    fontSize: '12px', padding: '4px 8px', cursor: 'pointer', color: '#495057',
+    background: 'transparent', border: '1px solid #ced4da', borderRadius: '4px',
+  } as Partial<CSSStyleDeclaration>);
+  const status = doc.createElement('span');
+  Object.assign(status.style, { fontSize: '11px', color: '#868e96', whiteSpace: 'nowrap' } as Partial<CSSStyleDeclaration>);
+
+  const close = () => bar.remove();
+  const run = async () => {
+    const instruction = input.value.trim();
+    if (!instruction) return;
+    const sm = cell.model?.sharedModel;
+    const source: string =
+      typeof sm?.getSource === 'function' ? sm.getSource() : String(cell.model?.source ?? '');
+    const language = /^\s*%%sql\b/.test(source) ? 'sql' : 'python';
+    apply.disabled = true; input.disabled = true; status.textContent = 'AI 처리 중…';
+    try {
+      const res = await fetch('/api/copilot/edit-cell', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ source, instruction, language, connection_id: connectionId }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.detail ?? `${res.status} ${res.statusText}`);
+      }
+      const data = await res.json();
+      sm.setSource(data.source ?? '');
+      close();
+    } catch (err) {
+      status.textContent = '실패: ' + ((err as Error).message || String(err));
+      apply.disabled = false; input.disabled = false;
+    }
+  };
+  apply.addEventListener('click', run);
+  cancel.addEventListener('click', close);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); run(); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
+  bar.append(input, apply, cancel, status);
+  node.appendChild(bar);
+  input.focus();
+}
+
+function injectCellButtons(connectionId: string | null): void {
+  const panel = getActiveNotebookPanel();
+  const widgets: any[] | undefined = panel?.content?.widgets;
+  if (!widgets) return;
+  for (const cell of widgets) {
+    if (cell?.model?.type !== 'code') continue;
+    const node: HTMLElement | undefined = cell.node;
+    if (!node) continue;
+    // Inject next to the native cell-toolbar icons (duplicate / move / delete).
+    const toolbar = node.querySelector('.jp-cell-toolbar');
+    if (!toolbar || toolbar.querySelector('.zini-cell-btn')) continue;
+    const doc = node.ownerDocument;
+    const btn = doc.createElement('button');
+    btn.className = 'zini-cell-btn';
+    btn.type = 'button';
+    btn.textContent = '✨';
+    btn.title = 'AI로 이 셀 수정 (다분석할Zini)';
+    Object.assign(btn.style, {
+      cursor: 'pointer', background: 'transparent', border: 'none',
+      fontSize: '14px', lineHeight: '1', padding: '0 4px', color: '#7048e8',
+    } as Partial<CSSStyleDeclaration>);
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openCellEditBar(cell, connectionId);
+    });
+    toolbar.appendChild(btn);
+  }
+}
+
 function getActiveNotebookPanel(): any | null {
   const app = getJupyterApp();
   if (!app) return null;
@@ -731,12 +847,38 @@ function getActiveNotebookPanel(): any | null {
   return null;
 }
 
+// Make sure copilot.ipynb exists on disk (create an empty one if missing) so
+// we can open it in-app without the "could not find path" error.
+async function ensureCopilotFileExists(): Promise<void> {
+  const head = await fetch(`${COPILOT_NOTEBOOK_URL}?_=${Date.now()}`, {
+    headers: copilotApiHeaders(),
+    credentials: 'omit',
+    cache: 'no-store',
+  });
+  if (head.ok) return;
+  if (head.status !== 404) throw new Error(`Jupyter GET failed: ${head.status}`);
+  await putCopilotNotebook(emptyCopilotNotebook().content);
+}
+
 async function insertCellIntoNotebook(
   language: 'sql' | 'python',
   source: string,
 ): Promise<{ path: string; mode: 'live' | 'rest' }> {
-  const panel = getActiveNotebookPanel();
-  if (panel) {
+  const app = getJupyterApp();
+  let panel = getActiveNotebookPanel();
+  // No notebook open yet → open copilot.ipynb IN-APP (no iframe reload) so the
+  // inserted cell shows up live. Create the file first if it doesn't exist.
+  if (!panel && app) {
+    try {
+      await ensureCopilotFileExists();
+      const w = await app.commands.execute('docmanager:open', { path: COPILOT_NOTEBOOK });
+      if (w?.context?.ready) await w.context.ready;
+      panel = isNotebookPanel(w) ? w : getActiveNotebookPanel();
+    } catch {
+      panel = getActiveNotebookPanel();
+    }
+  }
+  if (panel?.content?.model?.sharedModel) {
     try {
       panel.content.model.sharedModel.addCell({
         cell_type: 'code',
@@ -746,15 +888,15 @@ async function insertCellIntoNotebook(
       try {
         await panel.context.save();
       } catch {
-        // The cell is already in the live model; a failed save just means
-        // the analyst saves manually later. Don't fail the insert for it.
+        // The cell is already in the live model; a failed save just means the
+        // analyst saves manually later. Don't fail the insert for it.
       }
       return { path: panel.context.path as string, mode: 'live' };
     } catch {
-      // Any live-path surprise (Lab mid-boot, API drift) — fall through to
-      // the REST append below rather than dropping the cell.
+      // Live-path surprise (Lab mid-boot, API drift) — fall through to REST.
     }
   }
+  // Last resort: write via REST. No iframe reload; the user can open the file.
   await appendCellToCopilotNotebook(language, source);
   return { path: COPILOT_NOTEBOOK, mode: 'rest' };
 }
@@ -872,11 +1014,6 @@ function CopilotPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [providerName, setProviderName] = useState<string>('');
-  // Per-cell inline edit ("Cursor-style"): instruction → LLM rewrites the cell
-  // currently selected in the embedded JupyterLab.
-  const [editInstr, setEditInstr] = useState('');
-  const [editBusy, setEditBusy] = useState(false);
-  const [editMsg, setEditMsg] = useState<string | null>(null);
   const [lastInsert, setLastInsert] = useState<string | null>(null);
   // Track which (sendSeq, blockIdx) pairs have already auto-inserted so
   // re-renders don't fire duplicate PUT/audit round-trips for the same block.
@@ -982,23 +1119,27 @@ function CopilotPanel({
           }
         }
       }
-      // Commit the assembled answer to history, then auto-insert every code
-      // block we detect. The user explicitly asked for "make the code" → the
-      // code lands in the active notebook without an extra click.
+      // Commit the assembled answer to history. Only AUTO-insert code into the
+      // notebook when the user's request actually asked for it (삽입/넣어/셀에…).
+      // Otherwise just show the answer with a manual "셀에 삽입" button so we
+      // don't clutter the notebook with code the user only wanted to read.
       setHistory((h) => [...h, { role: 'assistant', content: assembled }]);
       setPending('');
-      const seq = ++sendSeqRef.current;
       const blocks = splitMarkdownCodeBlocks(assembled)[0].blocks;
-      for (let k = 0; k < blocks.length; k++) {
-        const key = `${seq}:${k}`;
-        if (insertedRef.current.has(key)) continue;
-        insertedRef.current.add(key);
-        // Don't fail the whole reply if any one insert blows up — the manual
-        // "다시 삽입" button is still rendered as a fallback.
-        try {
-          await onInsert(blocks[k]);
-        } catch {
-          /* surfaced inline via setError already */
+      const wantsInsert = /(삽입|넣어|넣고|셀에|셀\s*추가|추가해|추가 해|insert|add\s*cell)/i.test(question);
+      if (wantsInsert) {
+        const seq = ++sendSeqRef.current;
+        for (let k = 0; k < blocks.length; k++) {
+          const key = `${seq}:${k}`;
+          if (insertedRef.current.has(key)) continue;
+          insertedRef.current.add(key);
+          // Don't fail the whole reply if any one insert blows up — the manual
+          // "셀에 삽입" button is still rendered as a fallback.
+          try {
+            await onInsert(blocks[k]);
+          } catch {
+            /* surfaced inline via setError already */
+          }
         }
       }
     } catch (e) {
@@ -1036,54 +1177,6 @@ function CopilotPanel({
       if (mode === 'rest') onCellInserted?.();
     } catch (e) {
       setError(`셀 삽입 실패: ${(e as Error).message}`);
-    }
-  };
-
-  // Rewrite the cell currently selected in the embedded JupyterLab via the LLM.
-  const editActiveCell = async () => {
-    setEditMsg(null);
-    const instruction = editInstr.trim();
-    if (!instruction) return;
-    const panel = getActiveNotebookPanel();
-    const cell = panel?.content?.activeCell;
-    if (!panel || !cell) {
-      setEditMsg('먼저 JupyterLab에서 수정할 셀을 클릭하세요.');
-      return;
-    }
-    if (cell.model?.type !== 'code') {
-      setEditMsg('코드 셀만 수정할 수 있습니다.');
-      return;
-    }
-    const sm = cell.model.sharedModel;
-    const source: string =
-      typeof sm?.getSource === 'function' ? sm.getSource() : String(cell.model.source ?? '');
-    const language = /^\s*%%sql\b/.test(source) ? 'sql' : 'python';
-    setEditBusy(true);
-    try {
-      const res = await fetch('/api/copilot/edit-cell', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ source, instruction, language, connection_id: connectionId }),
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error(d.detail ?? `${res.status} ${res.statusText}`);
-      }
-      const data = await res.json();
-      sm.setSource(data.source ?? '');
-      try {
-        await panel.context.save();
-      } catch {
-        /* live model already updated; the analyst can save manually */
-      }
-      setEditInstr('');
-      setEditMsg('✓ 선택한 셀을 수정했습니다.');
-      window.setTimeout(() => setEditMsg(null), 4000);
-    } catch (e) {
-      setEditMsg(`셀 수정 실패: ${(e as Error).message}`);
-    } finally {
-      setEditBusy(false);
     }
   };
 
@@ -1149,9 +1242,6 @@ function CopilotPanel({
               {narration && <Markdown>{narration}</Markdown>}
               {m.role === 'assistant' && blocks.length > 0 && (
                 <Group mt={6} gap="xs">
-                  <Badge variant="outline" color="green" size="sm">
-                    ✅ {blocks.length}개 셀이 노트북에 자동 추가됨
-                  </Badge>
                   {blocks.map((b, k) => (
                     <Badge
                       key={k}
@@ -1164,10 +1254,11 @@ function CopilotPanel({
                   ))}
                   <Button
                     size="xs"
-                    variant="subtle"
+                    variant="light"
+                    color="grape"
                     onClick={() => blocks.forEach((b) => onInsert(b))}
                   >
-                    🔁 다시 삽입
+                    📥 셀에 삽입
                   </Button>
                 </Group>
               )}
@@ -1195,36 +1286,6 @@ function CopilotPanel({
       )}
       {error && <Notification color="red" title="실패" onClose={() => setError(null)}>{error}</Notification>}
       {lastInsert && <Notification color="green" title="삽입 완료" onClose={() => setLastInsert(null)}>{lastInsert}</Notification>}
-
-      {/* Per-cell inline edit: rewrite the cell selected in JupyterLab. */}
-      <Stack gap={4}>
-        {editMsg && (
-          <Text size="xs" c={editMsg.startsWith('✓') ? 'teal' : 'red'}>{editMsg}</Text>
-        )}
-        <Group gap={6} wrap="nowrap">
-          <TextInput
-            size="xs"
-            placeholder="선택한 셀을 이렇게 고쳐줘 (예: 에러 처리 추가)"
-            value={editInstr}
-            onChange={(e) => setEditInstr(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && editInstr.trim()) editActiveCell();
-            }}
-            disabled={editBusy}
-            style={{ flex: 1 }}
-          />
-          <Button
-            size="xs"
-            variant="light"
-            color="grape"
-            onClick={editActiveCell}
-            loading={editBusy}
-            disabled={!editInstr.trim()}
-          >
-            ✏️ 셀 수정
-          </Button>
-        </Group>
-      </Stack>
 
       <Group gap={6}>
         <Textarea
@@ -1254,7 +1315,6 @@ function JupyterWithCopilot() {
   const defaultConn = conns.data?.find((c) => c.engine !== 'hive')?.connection_id ?? null;
   const [connId, setConnId] = useState<string | null>(null);
   const activeConn = connId ?? defaultConn;
-  const [labReloadToken, setLabReloadToken] = useState(0);
 
   // Collapsible + drag-resizable copilot panel.
   const [panelOpen, setPanelOpen] = useState(true);
@@ -1282,7 +1342,7 @@ function JupyterWithCopilot() {
   return (
     <div style={{ display: 'flex', height: '100%', width: '100%', position: 'relative' }}>
       <div style={{ flex: '1 1 auto', minWidth: 280, height: '100%' }}>
-        <JupyterLab reloadToken={labReloadToken} />
+        <JupyterLab connectionId={activeConn} />
       </div>
 
       {panelOpen ? (
@@ -1319,34 +1379,51 @@ function JupyterWithCopilot() {
                 />
                 <Button
                   size="xs"
-                  variant="subtle"
-                  color="gray"
-                  px={6}
+                  variant="light"
+                  color="grape"
+                  px={10}
                   onClick={() => setPanelOpen(false)}
-                  title="패널 닫기"
+                  title="패널 접기"
                 >
-                  ✕
+                  <span style={{ fontSize: 18, fontWeight: 800, lineHeight: 1 }}>›</span>
                 </Button>
               </Group>
               <div style={{ flex: 1, minHeight: 0 }}>
-                <CopilotPanel
-                  connectionId={activeConn}
-                  onCellInserted={() => setLabReloadToken((n) => n + 1)}
-                />
+                <CopilotPanel connectionId={activeConn} />
               </div>
             </Stack>
           </div>
         </>
       ) : (
-        <Button
-          size="xs"
-          variant="filled"
-          color="grape"
+        // Edge tab near the top-right — click to slide the panel out. Made
+        // bigger + higher so it's easy to spot.
+        <div
+          role="button"
+          tabIndex={0}
           onClick={() => setPanelOpen(true)}
-          style={{ position: 'absolute', top: 8, right: 8, zIndex: 5 }}
+          title="다분석할Zini 열기"
+          style={{
+            position: 'absolute',
+            top: 16,
+            right: 0,
+            zIndex: 5,
+            cursor: 'pointer',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 6,
+            padding: '14px 9px',
+            background: '#7048e8',
+            color: '#fff',
+            borderRadius: '10px 0 0 10px',
+            boxShadow: '-2px 2px 10px rgba(0,0,0,.22)',
+            fontWeight: 700,
+            lineHeight: 1,
+          }}
         >
-          🤖 다분석할Zini 열기
-        </Button>
+          <span style={{ fontSize: 20 }}>‹</span>
+          <span style={{ writingMode: 'vertical-rl', letterSpacing: 1, fontSize: 13 }}>다분석할Zini</span>
+        </div>
       )}
     </div>
   );
