@@ -102,7 +102,8 @@ const api = {
         return new Promise<Me>(() => {});
       }
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-      return r.json() as Promise<Me>;
+      // Backend shape is { user: {...} }; unwrap to the flat Me the UI uses.
+      return r.json().then((d) => d.user as Me);
     }),
   connections: () => fetch('/api/connections').then((r) => r.json() as Promise<Connection[]>),
   schema: (id: string) =>
