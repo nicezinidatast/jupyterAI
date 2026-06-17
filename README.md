@@ -73,6 +73,7 @@ docker compose -f infra/docker-compose/compose.prod.yml up -d --build
 ```
 
 기동 서비스: `portal(정적) · backend · jupyter · redis`.
+> **외부 노출 포트는 portal 단 하나**(호스트 `5500` → 컨테이너 `80`). backend·jupyter·redis 는 도커 내부 전용이라 따로 열 필요가 없습니다(브라우저는 5500의 portal만 보고, portal이 `/api`·`/jupyter` 를 내부로 프록시). 서버가 다른 포트를 열어줬다면 `PORTAL_PORT=<포트> docker compose -f infra/docker-compose/compose.prod.yml up -d --build` 로 띄우세요.
 > 빌드 단계의 SPA 번들링이 순간 **~4 GB** 메모리를 씁니다. 서버 RAM이 빠듯하면 프록시 되는 다른 PC에서 빌드 후 `docker save`/`load` 로 이미지를 옮기세요.
 
 ### (B) 개발 (`compose.yml`)
@@ -94,6 +95,8 @@ docker compose -f infra/docker-compose/compose.yml ps
 ---
 
 ## 5. 접속 & 계정
+
+> URL 포트: **운영 배포(A)는 `5500`**(서버 주소로 접속, 예 `http://<서버IP>:5500/`), **개발(B)은 `5180`**(`localhost`). 아래 표는 개발 기준이며, 운영은 `5180`→`5500`, `localhost`→서버 주소로 바꿔 보세요.
 
 | 화면 | URL | 설명 |
 |---|---|---|
@@ -154,7 +157,7 @@ docker compose -f infra/docker-compose/compose.prod.yml down -v
 
 | 증상 | 원인 / 대응 |
 |---|---|
-| `:5180` 접속 안 됨 | 포트 점유. 점유 프로세스 종료 또는 portal 포트 변경. |
+| `:5500`(운영) / `:5180`(개발) 접속 안 됨 | ① 서버 방화벽/보안그룹에서 해당 포트 인바운드 허용 확인 ② 호스트 포트 점유 시 점유 프로세스 종료 또는 `PORTAL_PORT=<다른포트>` 로 변경. |
 | `GET /api/copilot/provider` → 503 | `ANTHROPIC_API_KEY` 미설정, 또는 `LLM_PROVIDER=ollama` 인데 ollama 미기동. |
 | 로그인 후 흰 화면 | 브라우저 새로고침. 그래도면 백엔드 로그 확인. |
 | 빌드 중 SPA OOM | 빌드 머신 RAM 부족. `infra/portal/Dockerfile` 의 `NODE_OPTIONS` 상향 또는 RAM 더 큰 머신에서 빌드. |

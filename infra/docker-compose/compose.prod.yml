@@ -94,8 +94,11 @@ services:
     depends_on:
       - backend
       - jupyter
+    # Single public entrypoint. The on-prem (holdings) server only opens one
+    # host port to the outside, so default to 5500 — the port that box exposes.
+    # Override with PORTAL_PORT=<n> if a different host port is opened.
     ports:
-      - "5180:80"
+      - "${PORTAL_PORT:-5500}:80"
 
 volumes:
   redis-data:
