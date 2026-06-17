@@ -1,0 +1,103 @@
+name: dataplatform
+
+# ─────────────────────────────────────────────────────────────────────────
+# Production / on-prem stack (lean). Self-contained — does NOT include the dev
+# compose.yml. Run on the server with:
+#
+#     docker compose -f infra/docker-compose/compose.prod.yml up -d --build
+#
+# vs the dev compose.yml this drops: the 4 Vite dev-server containers (SPAs are
+# baked static into the portal image), keycloak (custom cookie auth), the app
+# postgres (SQLite), gateway (portal talks to backend directly), and the demo
+# DB sources (DB-connection feature removed). That frees ~1 GB RAM and removes
+# the runtime npm/network dependency — sized for a small (~8 GB) box.
+#
+# Needs backend/.env with LLM_PROVIDER=anthropic + ANTHROPIC_API_KEY for the
+# copilot. Data persists in the named volumes below.
+# ─────────────────────────────────────────────────────────────────────────
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7-alpine
+    <<: *restart
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-redis}", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD:-redis} ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    <<: *restart
+    env_file:
+      - ../../backend/.env
+    environment:
+      BACKEND_DATABASE_URL: sqlite+aiosqlite:////uploads/appdb/app.db
+      BACKEND_REDIS_URL: redis://:${REDIS_PASSWORD:-redis}@redis:6379/0
+      BACKEND_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      BACKEND_CREDENTIAL_KEY: ${BACKEND_CREDENTIAL_KEY:-KbhP6uONwhnJDuYcXvi_BZxiImf_venYe_6eI4kCbvI=}
+      # Per-cell edits use a lighter/faster model (single-shot, no multi-turn).
+      COPILOT_EDIT_MODEL: ${COPILOT_EDIT_MODEL:-claude-haiku-4-5-20251001}
+      # Custom cookie auth — OIDC/keycloak off.
+      BACKEND_OIDC_ENABLED: "false"
+    volumes:
+      - uploads-data:/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+    command:
+      - uvicorn
+      - backend.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+
+  jupyter:
+    build:
+      context: ../jupyter
+      dockerfile: Dockerfile
+    <<: *restart
+    # Safety cap on the shared box: bounds the Jupyter server + ALL user kernels
+    # so one user's huge dataframe can't OOM-kill the whole stack. Tune to host
+    # RAM (leave ~2-3 GB for backend/portal/SQLite + OS).
+    mem_limit: 4g
+    command:
+      - start-notebook.py
+      - --ServerApp.token=dataplatform
+      - --ServerApp.password=
+      - --ServerApp.allow_origin=*
+      - --ServerApp.disable_check_xsrf=True
+      - --ServerApp.tornado_settings={"headers":{"Content-Security-Policy":"frame-ancestors *"}}
+      - --ServerApp.base_url=/jupyter/
+      - --LabApp.expose_app_in_browser=True
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      # No demo DB sources in prod (DB-connection feature removed) → the kernel
+      # startup script skips engine registration cleanly when these are unset.
+    volumes:
+      - jupyter-data:/home/jovyan/work
+      - uploads-data:/home/jovyan/work/uploads
+
+  portal:
+    build:
+      context: ../..
+      dockerfile: infra/portal/Dockerfile
+    <<: *restart
+    depends_on:
+      - backend
+      - jupyter
+    ports:
+      - "5180:80"
+
+volumes:
+  redis-data:
+  jupyter-data:
+  uploads-data:

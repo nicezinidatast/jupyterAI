@@ -1,0 +1,11 @@
+# Keep the Docker build context small (applies to all root-context builds:
+# backend image and the production portal image). Only build-irrelevant paths.
+.git
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+**/.venv
+.venv
+.omc
+aidlc-docs
