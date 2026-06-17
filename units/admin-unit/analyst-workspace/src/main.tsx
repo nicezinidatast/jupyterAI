@@ -559,14 +559,35 @@ function Markdown({ children }: { children: string }) {
 }
 
 function JupyterLab({ connectionId }: { connectionId: string | null }) {
-  // Land on the JupyterLab HOME. The copilot opens copilot.ipynb in-app on the
-  // first insert (no iframe reload), so the embed never refreshes under the
-  // user. We only fade in once, on the initial load.
+  // Land in the user's OWN folder (work/<id>/) so the file browser starts there
+  // and new Launcher files are created there — the everyday view is personal.
+  // We create the folder first, then point the iframe at /lab/tree/<dir>; the
+  // copilot opens its notebook in-app on the first insert (no iframe reload).
   const [loading, setLoading] = useState(true);
+  const [src, setSrc] = useState<string | null>(null);
 
   // Keep the latest connection id available to the long-lived injector.
   const connRef = useRef(connectionId);
   connRef.current = connectionId;
+
+  // Resolve the iframe URL once: ensure work/<id>/ exists, then open Lab there.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        await ensureUserDir();
+      } catch {
+        /* Couldn't create the folder — fall back to the Jupyter root. */
+      }
+      if (cancelled) return;
+      const tree = USER_DIR ? `/tree/${USER_DIR}` : '';
+      setSrc(`/jupyter/lab${tree}?token=${JUPYTER_TOKEN}&reset`);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Inject the per-cell "✨ AI" edit button into the embedded notebook. Polling
   // self-heals across JupyterLab re-renders and when a notebook is opened.
   useEffect(() => {
@@ -580,9 +601,17 @@ function JupyterLab({ connectionId }: { connectionId: string | null }) {
     return () => window.clearInterval(id);
   }, []);
 
+  if (!src) {
+    return (
+      <Group justify="center" align="center" style={{ height: '100%' }}>
+        <Loader />
+      </Group>
+    );
+  }
+
   return (
     <iframe
-      src="/jupyter/lab?token=dataplatform&reset"
+      src={src}
       title="JupyterLab"
       onLoad={() => setLoading(false)}
       style={{
@@ -601,18 +630,52 @@ function JupyterLab({ connectionId }: { connectionId: string | null }) {
 // ---------------------------------------------------------------------------
 // Jupyter cell injection — append a code cell to the shared copilot.ipynb
 // ---------------------------------------------------------------------------
-// Per-user copilot notebook so multiple analysts on the shared JupyterLab
-// don't clobber one another. Defaults to copilot.ipynb until the logged-in
-// user is known (set via setCopilotNotebookForUser from api.me).
-let COPILOT_NOTEBOOK = 'copilot.ipynb';
+// Per-user working directory + copilot notebook on the shared JupyterLab.
+// Each analyst lands in their OWN folder (work/<id>/) so the default view
+// shows only their files (soft isolation — the shared single-token server
+// can't hard-block navigating up, but the everyday workflow stays personal),
+// and that folder lives on the persistent `work` volume so it survives a
+// container recreate. Defaults stay generic until api.me() resolves.
+let COPILOT_NOTEBOOK = 'copilot.ipynb'; // full path relative to the Jupyter root
+let COPILOT_NOTEBOOK_NAME = 'copilot.ipynb'; // basename only
+let USER_DIR = ''; // '' = Jupyter root; set to work/<id> once the user is known
 const JUPYTER_TOKEN = 'dataplatform';
 let COPILOT_NOTEBOOK_URL = `/jupyter/api/contents/${COPILOT_NOTEBOOK}`;
 
 function setCopilotNotebookForUser(username: string | null | undefined): void {
   const safe =
     (username || 'user').toLowerCase().replace(/[^a-z0-9_.-]/g, '_').slice(0, 40) || 'user';
-  COPILOT_NOTEBOOK = `copilot-${safe}.ipynb`;
+  USER_DIR = `work/${safe}`;
+  COPILOT_NOTEBOOK_NAME = `copilot-${safe}.ipynb`;
+  COPILOT_NOTEBOOK = `${USER_DIR}/${COPILOT_NOTEBOOK_NAME}`;
   COPILOT_NOTEBOOK_URL = `/jupyter/api/contents/${COPILOT_NOTEBOOK}`;
+}
+
+// Create the user's working directory (each path segment, idempotently) via
+// the Jupyter contents API so opening /lab/tree/<dir> and writing the copilot
+// notebook there both succeed. `work` already exists (mounted volume) so this
+// usually only creates the final work/<id> segment.
+async function ensureUserDir(): Promise<void> {
+  if (!USER_DIR) return;
+  const parts = USER_DIR.split('/');
+  let prefix = '';
+  for (const part of parts) {
+    prefix = prefix ? `${prefix}/${part}` : part;
+    const head = await fetch(`/jupyter/api/contents/${prefix}?_=${Date.now()}`, {
+      headers: copilotApiHeaders(),
+      credentials: 'omit',
+      cache: 'no-store',
+    });
+    if (head.ok) continue;
+    if (head.status !== 404) throw new Error(`Jupyter GET dir failed: ${head.status}`);
+    const put = await fetch(`/jupyter/api/contents/${prefix}`, {
+      method: 'PUT',
+      headers: copilotApiHeaders(),
+      credentials: 'omit',
+      body: JSON.stringify({ type: 'directory' }),
+    });
+    if (!put.ok) throw new Error(`Jupyter mkdir failed: ${put.status}`);
+  }
 }
 
 // Shared request headers for the Jupyter contents API (same auth/no-cache
@@ -641,7 +704,7 @@ function emptyCopilotNotebook(): any {
       nbformat_minor: 5,
     },
     format: 'json',
-    name: COPILOT_NOTEBOOK,
+    name: COPILOT_NOTEBOOK_NAME,
     path: COPILOT_NOTEBOOK,
   };
 }
@@ -687,7 +750,7 @@ async function appendCellToCopilotNotebook(language: 'sql' | 'python', source: s
   notebook.content.cells.push(cell);
   notebook.type = 'notebook';
   notebook.format = 'json';
-  notebook.name = COPILOT_NOTEBOOK;
+  notebook.name = COPILOT_NOTEBOOK_NAME;
   notebook.path = COPILOT_NOTEBOOK;
 
   await putCopilotNotebook(notebook.content);
@@ -882,6 +945,9 @@ async function ensureCopilotFileExists(): Promise<void> {
   });
   if (head.ok) return;
   if (head.status !== 404) throw new Error(`Jupyter GET failed: ${head.status}`);
+  // The notebook lives under work/<id>/ — make sure that folder exists first,
+  // otherwise the PUT 404s on the missing parent directory.
+  await ensureUserDir();
   await putCopilotNotebook(emptyCopilotNotebook().content);
 }
 
@@ -1240,7 +1306,7 @@ function CopilotPanel({
           <Text size="sm" c="dimmed" style={{ flexShrink: 0 }}>
             예: "지난 30일 매출 상위 도시 5개 알려줘" — 커넥션을 고르면 스키마 컨텍스트를 자동 주입합니다.
             응답에 SQL/Python 코드가 포함되면 현재 활성화된 노트북에 자동으로 셀을 추가합니다
-            (열린 노트북이 없으면 {COPILOT_NOTEBOOK}).
+            (열린 노트북이 없으면 {COPILOT_NOTEBOOK_NAME}).
           </Text>
         )}
 
