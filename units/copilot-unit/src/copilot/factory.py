@@ -48,3 +48,20 @@ def get_provider() -> CopilotProvider:
 
         return InternalVLLMProvider()
     raise ValueError(f"unknown LLM_PROVIDER: {name!r}")
+
+
+def describe_active() -> dict[str, str | None]:
+    """Non-network summary of the provider :func:`get_provider` would return.
+
+    Used by the backend startup log (so ``docker logs`` shows which model will
+    answer) and by ``python -m copilot.selftest``. Constructs the provider but
+    makes no network call; raises the same errors ``get_provider`` would (e.g.
+    missing ANTHROPIC_API_KEY, unknown INTERNAL_LLM_MODEL).
+    """
+    p = get_provider()
+    return {
+        "provider": p.name,
+        "model": getattr(p, "_model", None),
+        "endpoint": getattr(p, "_base_url", None),
+        "internal_network": os.environ.get("INTERNAL_NETWORK") or "false",
+    }

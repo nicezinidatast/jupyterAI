@@ -90,6 +90,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging(level=settings.log_level)
     configure_tracing(service_name="backend", otlp_endpoint=settings.otlp_endpoint or None)
 
+    # Copilot LLM — surface which provider/model will answer so it's visible in
+    # `docker logs` right at boot (e.g. provider=internal/gemma4 model=gemma4-31b-vllm).
+    # Never fatal: a misconfig is logged and the /api/copilot/* routes still 503 cleanly.
+    try:
+        from copilot.factory import describe_active
+
+        logger.info("copilot_provider_ready", **describe_active())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("copilot_provider_unavailable", error=str(e))
+
     # For a file-backed SQLite DB make sure the parent directory exists before
     # the engine opens the file (aiosqlite will not create missing dirs).
     _ensure_sqlite_dir(settings.database_url)
