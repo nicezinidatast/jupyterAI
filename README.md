@@ -37,7 +37,7 @@ flowchart LR
 | Docker + Docker Compose | Docker Desktop 4.x 이상 (Windows/macOS/Linux) |
 | RAM | 최소 ~8 GB 권장 (Jupyter 컨테이너 상한 4 GB + 백엔드/포털) |
 | 디스크 여유 | 약 3~4 GB |
-| Anthropic API 키 | 클라우드 LLM(기본) 사용 시. 폐쇄망이면 Ollama로 대체 가능(§6) |
+| Anthropic API 키 | 클라우드 LLM(기본) 사용 시. 폐쇄망이면 사내 vLLM(`INTERNAL_NETWORK=True`) 또는 Ollama로 대체(§6) |
 
 > `git clone` 후 **이 저장소 루트**에서 모든 명령을 실행합니다.
 
@@ -48,11 +48,15 @@ flowchart LR
 아래 내용을 `backend/.env` 로 저장합니다.
 
 ```dotenv
-# 코파일럿 LLM 선택: anthropic | ollama
-LLM_PROVIDER=anthropic
+# 내부망(폐쇄망) LLM 토글
+#   True  → 사내 vLLM(Keycloak 인증) 사용 → INTERNAL_LLM_MODEL 로 모델 선택
+#   False → 아래 LLM_PROVIDER 설정대로(클라우드 Claude / Ollama)
+INTERNAL_NETWORK=False
+INTERNAL_LLM_MODEL=gemma4          # gemma4 | gptoss120b
 
-# anthropic 사용 시
-ANTHROPIC_API_KEY=sk-ant-...
+# INTERNAL_NETWORK=False 일 때의 코파일럿 LLM: anthropic | ollama
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...       # anthropic 사용 시
 ```
 
 > `.env` 는 `.gitignore` 처리되어 있습니다. **키를 평문으로 커밋하지 마세요.**
@@ -124,6 +128,20 @@ docker compose -f infra/docker-compose/compose.yml --profile llm up -d ollama ol
 docker compose -f infra/docker-compose/compose.yml restart backend
 ```
 
+### (C) 내부망 vLLM — 사내 모델(Keycloak 인증)
+사내망에서 제공하는 vLLM 모델(Gemma-4 / GPT-OSS-120B)을 그대로 씁니다. 별도 키 발급 없이
+`backend/.env` 한 줄만 바꾸면 됩니다.
+```dotenv
+INTERNAL_NETWORK=True
+INTERNAL_LLM_MODEL=gemma4      # 또는 gptoss120b
+```
+- Keycloak 토큰 발급 → OpenAI 호환 `/v1/chat/completions` 스트리밍 호출까지 자동입니다(토큰은
+  만료 직전까지 재사용). 엔드포인트/계정 기본값이 코드에 내장돼 있어 보통 추가 설정이 필요 없습니다.
+- 계정·모델 id·SSL 검증을 바꿔야 하면 `INTERNAL_LLM_USERNAME` / `INTERNAL_LLM_PASSWORD` /
+  `INTERNAL_LLM_MODEL_ID` / `INTERNAL_LLM_VERIFY_SSL` 로 덮어쓸 수 있습니다.
+- `INTERNAL_NETWORK=True` 이면 `LLM_PROVIDER` 값은 무시됩니다(내부망 우선).
+- 바꾼 뒤 백엔드 재시작: `docker compose -f infra/docker-compose/compose.yml restart backend`
+
 ---
 
 ## 7. 사용자 격리 (현재: 소프트)
@@ -158,7 +176,7 @@ docker compose -f infra/docker-compose/compose.prod.yml down -v
 | 증상 | 원인 / 대응 |
 |---|---|
 | `:5500`(운영) / `:5180`(개발) 접속 안 됨 | ① 서버 방화벽/보안그룹에서 해당 포트 인바운드 허용 확인 ② 호스트 포트 점유 시 점유 프로세스 종료 또는 `PORTAL_PORT=<다른포트>` 로 변경. |
-| `GET /api/copilot/provider` → 503 | `ANTHROPIC_API_KEY` 미설정, 또는 `LLM_PROVIDER=ollama` 인데 ollama 미기동. |
+| `GET /api/copilot/provider` → 503 | `ANTHROPIC_API_KEY` 미설정, `LLM_PROVIDER=ollama` 인데 ollama 미기동, 또는 `INTERNAL_NETWORK=True` 인데 `INTERNAL_LLM_MODEL` 값이 `gemma4`/`gptoss120b` 가 아님. |
 | 로그인 후 흰 화면 | 브라우저 새로고침. 그래도면 백엔드 로그 확인. |
 | 빌드 중 SPA OOM | 빌드 머신 RAM 부족. `infra/portal/Dockerfile` 의 `NODE_OPTIONS` 상향 또는 RAM 더 큰 머신에서 빌드. |
 | 사용자가 큰 데이터로 느려짐/죽음 | 공유 서버 한계. Jupyter `mem_limit` 조정, 또는 §7의 JupyterHub 전환 검토. |
