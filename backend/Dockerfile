@@ -1,9 +1,11 @@
 FROM python:3.11-slim
 
 WORKDIR /app
-RUN useradd -r -u 10001 app && apt-get update && apt-get install -y --no-install-recommends \
-        libpq5 \
-    && rm -rf /var/lib/apt/lists/*
+# No system packages needed: Postgres goes through asyncpg (own protocol impl,
+# no system libpq), MySQL through aiomysql (pure-python), and prod runs on
+# SQLite. Dropping apt-get also removes the only build-time internet dependency
+# (deb.debian.org) — required for closed-network / on-prem servers.
+RUN useradd -r -u 10001 app
 
 # 1) External deps (pinned for the demo image).
 COPY backend/requirements.txt /tmp/req.txt
