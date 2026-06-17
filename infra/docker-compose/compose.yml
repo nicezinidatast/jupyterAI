@@ -79,10 +79,6 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      demo-postgres:
-        condition: service_healthy
-      demo-mysql:
-        condition: service_healthy
     ports:
       - "8081:8000"
     command:
@@ -98,6 +94,8 @@ services:
       context: ../..
       dockerfile: units/gateway-unit/Dockerfile
     <<: *restart
+    # 미사용: 포털 nginx가 /api/ → backend:8000 로 직접 프록시. full 에서만.
+    profiles: ["full"]
     environment:
       GATEWAY_BACKEND_URL: http://backend:8000
       GATEWAY_REDIS_URL: redis://:${REDIS_PASSWORD:-redis}@redis:6379/0
@@ -212,6 +210,8 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:24.0
     <<: *restart
+    # 미사용: 앱은 자체 쿠키 인증(SQLite). OIDC는 기본 off. full 에서만.
+    profiles: ["full"]
     command:
       - start-dev
       - --import-realm
@@ -243,6 +243,13 @@ services:
       context: ../jupyter
       dockerfile: Dockerfile
     <<: *restart
+    # Safety cap on a small shared box (the analysts all share this ONE server).
+    # Without it, a single user loading a huge dataframe could exhaust the host
+    # and OOM-kill the whole stack (login/DB included). This bounds Jupyter (the
+    # server + every user kernel) so the platform survives; if a kernel blows the
+    # limit only that kernel dies. Tune to the host: leave ~2-3 GB for the
+    # backend/portal/SQLite + OS (e.g. raise to 5g on an 8 GB box if needed).
+    mem_limit: 4g
     command:
       - start-notebook.py
       - --ServerApp.token=dataplatform
@@ -261,11 +268,6 @@ services:
       # docker-network service names — the same ones the backend uses.
       DATAPLATFORM_SALES_DSN: postgresql+psycopg2://demo:demo@demo-postgres:5432/sales
       DATAPLATFORM_CRM_DSN: mysql+pymysql://demo:demo@demo-mysql:3306/crm
-    depends_on:
-      demo-postgres:
-        condition: service_healthy
-      demo-mysql:
-        condition: service_healthy
     ports:
       - "8888:8888"
     volumes:
@@ -281,6 +283,8 @@ services:
   demo-postgres:
     image: postgres:16
     <<: *restart
+    # DB연결 기능 제거됨 — 데모 데이터 소스는 full 프로파일에서만.
+    profiles: ["full"]
     environment:
       POSTGRES_DB: sales
       POSTGRES_USER: demo
@@ -299,6 +303,8 @@ services:
   demo-mysql:
     image: mysql:8.0
     <<: *restart
+    # DB연결 기능 제거됨 — 데모 데이터 소스는 full 프로파일에서만.
+    profiles: ["full"]
     environment:
       MYSQL_ROOT_PASSWORD: demoroot
       MYSQL_DATABASE: crm
