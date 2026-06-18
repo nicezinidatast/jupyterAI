@@ -20,6 +20,15 @@ c.JupyterHub.bind_url = "http://:8000"
 # 유지하기 위함이다(허브 페이지·사용자 서버 모두 /jupyter/... 로 노출).
 c.JupyterHub.base_url = "/jupyter/"
 
+# DockerSpawner 필수: 스폰된 사용자 컨테이너가 허브에 "다시 접속"할 주소를 알려준다.
+# 허브 기본값 hub_ip=127.0.0.1 은 같은 호스트(LocalProcessSpawner)에서만 통한다.
+# 컨테이너별 스폰에서는 사용자 컨테이너가 허브를 자기 자신의 127.0.0.1 로 찾으려다
+# 실패해 등록이 안 되고, 스폰이 타임아웃→컨테이너 제거되어 결국 Lab 접속이 404가 된다.
+# 허브는 0.0.0.0 으로 듣고, 사용자 컨테이너는 도커 네트워크의 허브 서비스명(jupyterhub)으로
+# 접속하게 한다. (compose의 서비스명과 반드시 일치 — env로도 덮어쓸 수 있게 둔다.)
+c.JupyterHub.hub_ip = "0.0.0.0"
+c.JupyterHub.hub_connect_ip = os.environ.get("HUB_CONNECT_IP", "jupyterhub")
+
 # 플랫폼 백엔드 SSO 토큰을 검증하는 커스텀 인증자를 사용한다.
 # 기본 PAMAuthenticator(OS 사용자) 대신 platform_authenticator 모듈을 지정해
 # 백엔드 /api/auth/me 검증 흐름과 통합한다.
