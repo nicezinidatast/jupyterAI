@@ -85,4 +85,7 @@ class PlatformAuthenticator(Authenticator):
 
         # auth_state에 토큰을 포함해 반환하면, JupyterHub가 이를 암호화해 DB에 저장한다.
         # 이후 spawner가 사용자 컨테이너 기동 시 이 토큰을 환경변수로 주입할 수 있다.
-        return {"name": r.json().get("user_id"), "auth_state": {"token": token}}
+        # /api/auth/me 응답은 {"user": {...}} 형태라 user_id는 user 안에 중첩돼 있다.
+        body = r.json()
+        user_id = (body.get("user") or {}).get("user_id")
+        return {"name": user_id, "auth_state": {"token": token}}

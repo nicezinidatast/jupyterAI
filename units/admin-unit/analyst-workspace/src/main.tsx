@@ -670,9 +670,12 @@ function JupyterLab({ connectionId }: { connectionId: string | null }) {
         /* 토큰 발급 실패 — 토큰 없이 시도(허브가 거부하면 사용자가 재로그인) */
       }
       if (cancelled) return;
-      // next는 본인 서버의 Lab. 첫 스폰은 컨테이너 기동에 시간이 걸려 허브의
-      // "서버 시작 중" 화면이 잠깐 보였다가 Lab으로 전환된다.
-      const next = `${JUPYTER_USER_BASE}/lab`;
+      // next는 허브의 spawn 엔드포인트로 둔다. 로그인 직후 사용자 서버를(없으면)
+      // 스폰하고, 끝나면 그 사람의 Lab(/jupyter/user/<id>/lab, default_url=/lab)으로
+      // 리다이렉트한다. /user/<id>/lab로 곧장 가면 서버 미기동 시 허브가 424를 내므로,
+      // 반드시 spawn을 거쳐 자동 기동시킨다. 첫 스폰은 컨테이너 기동에 시간이 걸려
+      // 허브의 "서버 시작 중" 화면이 잠깐 보였다가 Lab으로 전환된다.
+      const next = '/jupyter/hub/spawn';
       setSrc(
         `/jupyter/hub/login?platform_token=${encodeURIComponent(token)}&next=${encodeURIComponent(next)}`,
       );

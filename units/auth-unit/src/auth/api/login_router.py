@@ -68,6 +68,9 @@ class LoginBody(BaseModel):
 
 
 class UserOut(BaseModel):
+    # user_id(UUID 문자열): SPA가 사용자별 JupyterHub 서버 경로(/jupyter/user/<id>)를
+    # 만들고, 허브 인증자가 허브 사용자명으로 쓰는 값이라 반드시 내려준다.
+    user_id: str
     email: str  # 실제로는 사용자명을 담는다(클라이언트 호환을 위해 필드명은 ``email`` 유지)
     display_name: str | None
     roles: list[str]
@@ -123,6 +126,7 @@ def _set_session_cookie(response: Response, request: Request, session_id) -> Non
 def _user_payload(user: User, roles: list[str]) -> dict[str, object]:
     return {
         "user": UserOut(
+            user_id=str(user.user_id),
             email=user.email,
             display_name=user.display_name,
             roles=sorted(roles),
