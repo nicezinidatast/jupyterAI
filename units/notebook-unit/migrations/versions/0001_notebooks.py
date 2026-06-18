@@ -109,14 +109,19 @@ def upgrade() -> None:
     )
     op.create_table(
         "share_audience",
+        # 대리(surrogate) PK. models.ShareAudience와 반드시 일치시킨다 — 복합 PK
+        # (link_id, subject_user_id, subject_role)로 두면 세 컬럼이 모두 NOT NULL이 되어
+        # 바로 아래 XOR 제약(둘 중 하나는 NULL이어야 함)과 정면 충돌하고, ORM이 PK로
+        # 매핑하는 audience_id 컬럼도 없어 INSERT가 깨진다.
+        sa.Column("audience_id", _UUID, primary_key=True),
         sa.Column(
             "link_id",
             _UUID,
             sa.ForeignKey("share_links.link_id", ondelete="CASCADE"),
-            primary_key=True,
+            nullable=False,
         ),
-        sa.Column("subject_user_id", _UUID, primary_key=True),
-        sa.Column("subject_role", sa.String(32), primary_key=True),
+        sa.Column("subject_user_id", _UUID),
+        sa.Column("subject_role", sa.String(32)),
         # XOR 제약: user_id와 role 중 하나만 채워졌음을 강제한다.
         sa.CheckConstraint(
             "(subject_user_id IS NULL) <> (subject_role IS NULL)",

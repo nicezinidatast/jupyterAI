@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
@@ -159,7 +159,9 @@ class ShareAudience(Base):
     # 대리(surrogate) PK를 둬서 (user_id | role) XOR이 실제 NULL을 쓸 수 있게 한다 —
     # Postgres는 PK 컬럼을 모두 NOT NULL로 만들어 우리의 XOR 규칙과 충돌하므로,
     # user_id/role을 PK로 쓰지 않고 별도 audience_id를 PK로 둔다.
-    audience_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    # default=uuid4 필수: 삽입 측(ShareLinkManager.create)은 audience_id를 직접 채우지
+    # 않으므로, 기본값 생성기가 없으면 PK가 NULL이 되어 NOT NULL 위반으로 INSERT가 깨진다.
+    audience_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     link_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("share_links.link_id", ondelete="CASCADE"),
