@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -795,8 +795,9 @@ async def dashboard_stats(session: Session) -> DashboardStats:
     - 대시보드 수치는 엄격한 정합성이 필요 없으므로 일관된 스냅샷 트랜잭션이
       불필요하다.
 
-    audit_events_last_24h 필드는 현재 24시간 필터 없이 전체 건수를 반환한다.
-    필드 이름과 실제 동작이 다르므로 추후 수정이 필요하다.
+    audit_events_last_24h는 occurred_at(이벤트 실제 발생 시각)이 최근 24시간 안인
+    감사 로그만 센다. cutoff는 naive UTC로 계산한다 — 이벤트 생산자들이 occurred_at을
+    datetime.utcnow()(naive UTC)로 기록하므로 같은 형식으로 비교해야 한다.
     """
     from sqlalchemy import func as sql_func
 
@@ -810,8 +811,14 @@ async def dashboard_stats(session: Session) -> DashboardStats:
     connections = await session.scalar(select(sql_func.count()).select_from(Connection)) or 0
     pii_patterns = await session.scalar(select(sql_func.count()).select_from(PiiPattern)) or 0
     notebooks = await session.scalar(select(sql_func.count()).select_from(Notebook)) or 0
+    audit_cutoff = datetime.utcnow() - timedelta(hours=24)
     audit_events = (
-        await session.scalar(select(sql_func.count()).select_from(AuditLog)) or 0
+        await session.scalar(
+            select(sql_func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.occurred_at >= audit_cutoff)
+        )
+        or 0
     )
     backups_ok = (
         await session.scalar(
