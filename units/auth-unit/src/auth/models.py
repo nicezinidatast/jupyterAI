@@ -37,6 +37,11 @@ class User(Base):
     # None인 것과 "비밀번호 틀림"은 다른 상황이며, 검증 헬퍼가 둘 다 안전하게 처리한다.
     password_hash: Mapped[str | None] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # 초기(관리자 지정) 비밀번호를 본인이 아직 바꾸지 않았으면 True. 관리자가
+    # 비밀번호를 정해 계정을 만들거나 비밀번호를 초기화하면 True가 되고, 본인이
+    # 변경하면 False가 된다. 첫 로그인 후 분석 워크스페이스가 "비밀번호를 변경하세요"
+    # 안내 팝업을 띄울지 판단하는 신호다. 스스로 가입한 사용자는 처음부터 False.
+    must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

@@ -71,6 +71,8 @@ class UserOut(BaseModel):
     email: str  # 실제로는 사용자명을 담는다(클라이언트 호환을 위해 필드명은 ``email`` 유지)
     display_name: str | None
     roles: list[str]
+    # True면 SPA가 첫 로그인 후 "초기 비밀번호를 변경하세요" 팝업을 띄운다.
+    must_change_password: bool = False
 
 
 class ChangePasswordBody(BaseModel):
@@ -121,7 +123,10 @@ def _set_session_cookie(response: Response, request: Request, session_id) -> Non
 def _user_payload(user: User, roles: list[str]) -> dict[str, object]:
     return {
         "user": UserOut(
-            email=user.email, display_name=user.display_name, roles=sorted(roles)
+            email=user.email,
+            display_name=user.display_name,
+            roles=sorted(roles),
+            must_change_password=user.must_change_password,
         ).model_dump()
     }
 
@@ -275,6 +280,8 @@ async def change_password(
         raise HTTPException(status_code=400, detail="invalid_current_password")
 
     user.password_hash = hash_password(body.new_password)
+    # 본인이 직접 바꿨으니 초기 비밀번호 변경 안내 플래그를 해제한다(팝업 재노출 방지).
+    user.must_change_password = False
     await db.commit()
     logger.info("auth_password_changed", username=user.email)
     return {"ok": True}

@@ -101,6 +101,8 @@ type Me = {
   email: string;
   display_name: string | null;
   roles: string[];
+  // true면 첫 로그인 후 "초기 비밀번호를 변경하세요" 팝업을 자동으로 띄운다.
+  must_change_password?: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -1683,7 +1685,17 @@ function JupyterWithCopilot() {
 // 자체 폼 상태(현재/새/확인)와 제출·검증을 모두 안에서 처리하고, 성공 시 성공
 // 화면으로 전환한다. 현재 비밀번호 확인은 서버가 하므로, 여기선 새 비밀번호의
 // 길이(>=4)와 확인 일치만 사전 검증해 불필요한 왕복을 줄인다.
-function ChangePasswordModal({ opened, onClose }: { opened: boolean; onClose: () => void }) {
+function ChangePasswordModal({
+  opened,
+  onClose,
+  forced = false,
+}: {
+  opened: boolean;
+  onClose: () => void;
+  // forced: 초기 비밀번호 미변경 상태에서 자동으로 열린 경우. 상단에 변경 권유 안내를 띄운다.
+  forced?: boolean;
+}) {
+  const qc = useQueryClient();
   const [cur, setCur] = useState('');
   const [next, setNext] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -1715,6 +1727,9 @@ function ChangePasswordModal({ opened, onClose }: { opened: boolean; onClose: ()
     setBusy(true);
     try {
       await api.changePassword(cur, next);
+      // 변경 성공 → /me를 다시 불러 must_change_password가 false로 갱신되게 한다
+      // (강제 안내 팝업이 다시 열리지 않도록).
+      qc.invalidateQueries({ queryKey: ['me'] });
       setOk(true);
     } catch {
       // 서버가 400/401을 주면 여기로 온다. 어느 쪽이든 사용자가 할 일은 같으므로
@@ -1737,6 +1752,12 @@ function ChangePasswordModal({ opened, onClose }: { opened: boolean; onClose: ()
           </>
         ) : (
           <>
+            {/* 강제(첫 로그인) 상황이면 변경을 권유하는 안내 문구를 띄운다 */}
+            {forced && (
+              <Notification color="orange" withCloseButton={false} title="초기 비밀번호 변경 권장">
+                관리자가 설정한 초기 비밀번호로 로그인했습니다. 보안을 위해 비밀번호를 변경해 주세요.
+              </Notification>
+            )}
             <PasswordInput
               label="현재 비밀번호"
               value={cur}
@@ -1778,6 +1799,11 @@ function Shell() {
   const [navOpen, setNavOpen] = useState(false);
   // 비밀번호 변경 모달 열림 상태. 헤더 버튼이 켜고, 모달이 onClose로 끈다.
   const [pwOpen, setPwOpen] = useState(false);
+  // 첫 로그인(관리자 지정 초기 비밀번호 미변경)이면 변경 모달을 자동으로 띄운다.
+  // 변경에 성공하면 ['me']가 갱신되어 must_change_password가 false가 되므로 다시 열리지 않는다.
+  useEffect(() => {
+    if (me.data?.must_change_password) setPwOpen(true);
+  }, [me.data?.must_change_password]);
   // Jupyter 화면에서는 사용자가 햄버거로 명시적으로 열지 않는 한 사이드바를 접는다.
   const navCollapsed = isJupyter && !navOpen;
 
@@ -1869,7 +1895,11 @@ function Shell() {
     </AppShell>
     {/* 비밀번호 변경 모달은 Mantine이 포털로 body에 렌더하므로 위치는 무관하지만,
         AppShell 바깥 형제로 두어 레이아웃 계산에 끼어들지 않게 한다 */}
-    <ChangePasswordModal opened={pwOpen} onClose={() => setPwOpen(false)} />
+    <ChangePasswordModal
+      opened={pwOpen}
+      onClose={() => setPwOpen(false)}
+      forced={!!me.data?.must_change_password}
+    />
     </>
   );
 }

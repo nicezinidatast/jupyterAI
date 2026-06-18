@@ -26,7 +26,15 @@ def upgrade() -> None:
         sa.Column("user_id", sa.dialects.postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("email", sa.String(320), nullable=False, unique=True),
         sa.Column("display_name", sa.String(200)),
+        # 로컬 비밀번호 로그인용 bcrypt 해시(OIDC 전용 사용자는 NULL). 모델에는 처음부터
+        # 있었으나 마이그레이션에 누락돼 있던 것을 보강한다 — 없으면 prod(alembic)에서
+        # 가입/로그인이 password_hash 컬럼 부재로 깨진다.
+        sa.Column("password_hash", sa.String(255)),
         sa.Column("is_active", sa.Boolean, nullable=False, server_default=sa.true()),
+        # 초기(관리자 지정) 비밀번호 변경 안내 플래그. 모델과 일치시킨다.
+        sa.Column(
+            "must_change_password", sa.Boolean, nullable=False, server_default=sa.false()
+        ),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
         ),

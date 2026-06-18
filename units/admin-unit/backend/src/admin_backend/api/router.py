@@ -163,6 +163,8 @@ async def create_user(body: UserCreate, session: Session) -> UserOut:
             display_name=body.display_name,
             password_hash=password_hash,
             is_active=True,
+            # 관리자가 비밀번호를 정해 만든 계정이면 본인이 첫 로그인 후 바꾸도록 안내한다.
+            must_change_password=bool(body.password),
         )
     )
     for role in body.roles:
@@ -239,6 +241,8 @@ async def reset_user_password(
     if user is None:
         raise HTTPException(status_code=404, detail="user not found")
     user.password_hash = hash_password(body.password)
+    # 관리자가 초기화한 비밀번호도 본인이 첫 로그인 후 바꾸도록 안내한다.
+    user.must_change_password = True
     await session.commit()
     return {"ok": True}
 

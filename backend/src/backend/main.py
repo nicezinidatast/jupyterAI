@@ -18,6 +18,8 @@ from typing import AsyncIterator
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Response
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from admin_backend.api.router import router as admin_router
@@ -48,6 +50,32 @@ from notebook.models import Base as NotebookBase
 logger = get_logger("backend.main")
 
 _ALL_BASES = (AuthBase, AuditBase, CredentialBase, DataBase, NotebookBase, AdminBase)
+
+
+async def _ensure_user_columns(engine: AsyncEngine) -> None:
+    """나중에 추가된 ``users`` 컬럼을 기존 DB에도 멱등하게 보강한다.
+
+    ``create_all``은 이미 존재하는 테이블에 컬럼을 추가하지 않는다. 그래서 영속
+    볼륨에 남아 있는 기존 SQLite DB(또는 운영 DB)는 신규 컬럼이 없어, 모델이 그
+    컬럼을 SELECT하는 순간 "no such column"으로 로그인·조회가 모두 깨진다. 여기서
+    누락 컬럼만 골라 ``ALTER TABLE ... ADD COLUMN``으로 채운다 — 이미 있으면 건너뛰어
+    멱등하다. ``DEFAULT false``는 SQLite(3.23+)와 Postgres 양쪽에서 동작한다.
+
+    대상: ``must_change_password``(첫 로그인 비밀번호 변경 안내 플래그).
+    """
+
+    def _add(sync_conn) -> None:
+        existing = {c["name"] for c in sa_inspect(sync_conn).get_columns("users")}
+        if "must_change_password" not in existing:
+            sync_conn.execute(
+                sa_text(
+                    "ALTER TABLE users ADD COLUMN must_change_password "
+                    "BOOLEAN NOT NULL DEFAULT false"
+                )
+            )
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_add)
 
 
 async def _create_all_tables(engine: AsyncEngine) -> None:
@@ -170,6 +198,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     try:
         await _create_all_tables(engine)
+        # 기존 DB에 누락된 신규 컬럼(must_change_password)을 보강한다(create_all 직후).
+        await _ensure_user_columns(engine)
         # DB URL에서 패스워드 부분(@ 앞)을 제외하고 로그에 기록한다.
         logger.info("backend_startup", database=settings.database_url.split("@")[-1])
         async with app.state.session_factory() as session:
