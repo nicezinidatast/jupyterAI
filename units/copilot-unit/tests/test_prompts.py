@@ -1,4 +1,4 @@
-"""build_system_prompt — schema injection, no PII data, table rendering."""
+"""build_system_prompt 테스트 — 스키마 주입, PII 데이터 미포함, 테이블 렌더링."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def test_renders_tables_and_pii_marker() -> None:
 
 
 def test_excludes_row_data() -> None:
-    """Sanity: the prompt builder never lets row values sneak in."""
+    """안전성 점검: 프롬프트 빌더는 행(row) 값이 새어 들어가게 두지 않는다."""
     schema = {
         "tables": [
             {
@@ -40,7 +40,7 @@ def test_excludes_row_data() -> None:
                 "columns": [
                     {"name": "name", "type": "text", "pii_kind": "name"},
                 ],
-                # Even if a caller mistakenly attached row data, it must not appear
+                # 호출자가 실수로 행 데이터를 붙였더라도 프롬프트에 나타나선 안 된다
                 "rows": [{"name": "leaked@example.com"}],
             }
         ]

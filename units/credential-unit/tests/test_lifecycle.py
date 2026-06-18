@@ -1,7 +1,10 @@
-"""Per PRD US-CODE-09: PBT — credential state machine.
+"""PRD US-CODE-09 — Credential 상태 기계(state machine) 검증 (PBT 스타일).
 
-State transitions: register → rotate → delete.  After delete, resolve must
-return NOT_FOUND, and the cache must be invalidated.
+상태 전이 경로: register → rotate → delete.
+검증 불변식:
+  - delete 이후 resolve는 NOT_FOUND를 반환해야 한다.
+  - rotate 이후 캐시는 무효화되어 새 시크릿이 반환되어야 한다.
+  - 타 사용자가 personal Credential에 접근하면 FORBIDDEN이어야 한다.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ pytestmark = pytest.mark.asyncio
 
 
 def _ctx(user_id: str) -> UserContext:
+    """테스트용 UserContext 헬퍼 — 실제 인증 없이 user_id만 지정한다."""
     return UserContext(
         user_id=UserId(user_id),
         roles=("Analyst",),
@@ -42,6 +46,7 @@ def _ctx(user_id: str) -> UserContext:
 
 @pytest_asyncio.fixture
 async def session() -> AsyncIterator[AsyncSession]:
+    """인메모리 SQLite DB를 생성하고 스키마를 적용한 세션을 제공한다."""
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:", connect_args={"check_same_thread": False}
     )
@@ -54,6 +59,13 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 
 async def test_register_rotate_delete_then_resolve_not_found(session: AsyncSession) -> None:
+    """register → rotate → delete 전체 생애주기 후 resolve가 NOT_FOUND를 반환하는지 검증한다.
+
+    각 단계에서 시크릿 값이 올바르게 반영되는지도 함께 확인한다:
+      - register 직후 resolve: 초기 값(pw1) 반환
+      - rotate 직후 resolve: 신규 값(pw2) 반환 (캐시 무효화 확인)
+      - delete 직후 resolve: NOT_FOUND 반환
+    """
     vault = InMemoryVaultAdapter()
     svc = CredentialVault(session=session, vault=vault, cache=ResolveCache(ttl_seconds=1))
     owner = uuid4()
@@ -84,6 +96,11 @@ async def test_register_rotate_delete_then_resolve_not_found(session: AsyncSessi
 
 
 async def test_resolve_other_users_personal_is_forbidden(session: AsyncSession) -> None:
+    """소유자가 아닌 다른 사용자가 personal Credential에 접근하면 FORBIDDEN이어야 한다.
+
+    shared Credential의 접근 제어는 data-unit의 connection grant로 별도 처리되며
+    이 테스트는 personal 스코프의 owner 격리만 검증한다.
+    """
     vault = InMemoryVaultAdapter()
     svc = CredentialVault(session=session, vault=vault, cache=ResolveCache(ttl_seconds=1))
     owner = uuid4()

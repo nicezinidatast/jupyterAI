@@ -1,6 +1,15 @@
-"""Initial audit schema with WORM trigger.
+"""감사 로그 초기 스키마 마이그레이션 — WORM 트리거 포함.
 
 Revision ID: 0001_audit_initial
+
+생성 내용:
+  - audit_outbox: outbox 패턴용 이벤트 임시 버퍼 테이블.
+  - audit_log: 영구 감사 기록 테이블 (WORM: Write Once Read Many).
+  - trig_audit_log_no_modify: audit_log의 UPDATE / DELETE / TRUNCATE를 차단하는
+    PL/pgSQL 트리거 — NFR-SEC-14 요건 충족.
+
+WORM 트리거가 있어도 애플리케이션 레이어에서는 INSERT 외 시도를 하지 않아야 한다.
+트리거는 최후 방어선이지 유일한 통제 수단이 아니다.
 """
 
 from __future__ import annotations
@@ -24,6 +33,7 @@ def upgrade() -> None:
         ),
         sa.Column("delivered_at", sa.DateTime(timezone=True)),
     )
+    # partial index — delivered_at IS NULL 조건으로 미전달 행만 인덱싱해 컨슈머 쿼리를 최적화한다.
     op.create_index(
         "idx_audit_outbox_undelivered",
         "audit_outbox",
@@ -48,11 +58,12 @@ def upgrade() -> None:
             "result IN ('success', 'failure')", name="ck_result_enum"
         ),
     )
+    # (actor_id, occurred_at) 복합 인덱스 — 특정 행위자의 시간 범위 조회를 가속한다.
     op.create_index(
         "idx_audit_log_actor_time", "audit_log", ["actor_id", "occurred_at"]
     )
 
-    # WORM enforcement — refuse UPDATE / DELETE / TRUNCATE on audit_log.
+    # WORM 강제 트리거 — audit_log에 대한 UPDATE / DELETE / TRUNCATE를 거부한다.
     op.execute(
         """
         CREATE OR REPLACE FUNCTION block_audit_modification() RETURNS TRIGGER AS $$

@@ -1,4 +1,7 @@
-"""data-unit schema.
+"""data-unit 스키마(최초 마이그레이션).
+
+models.py의 테이블 정의를 실제 DB 스키마로 옮긴다. CHECK 제약·기본키·외래키를
+모델과 동일하게 선언해 둘이 어긋나지 않게 한다(드리프트 방지).
 
 Revision ID: 0001_data_initial
 """
@@ -8,6 +11,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+# down_revision=None: 이 단위의 최초 리비전. 위로 거슬러 올라갈 부모가 없다.
 revision = "0001_data_initial"
 down_revision = None
 branch_labels = None
@@ -18,6 +22,8 @@ _JSON = sa.dialects.postgresql.JSONB
 
 
 def upgrade() -> None:
+    # 외래키 의존성 순서대로 생성한다: 부모(connections)를 먼저 만들고,
+    # 이를 참조하는 자식 테이블(grants·column_policies)을 뒤에 만든다.
     op.create_table(
         "connections",
         sa.Column("connection_id", _UUID, primary_key=True),
@@ -111,6 +117,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # 생성의 역순으로 삭제한다. 자식 테이블을 먼저 지워야 외래키 제약 위반
+    # 없이 부모(connections)를 마지막에 안전하게 제거할 수 있다.
     for table in (
         "file_uploads",
         "query_executions",

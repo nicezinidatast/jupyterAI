@@ -1,4 +1,8 @@
-"""Smoke test — every public submodule is importable."""
+"""스모크 테스트 — 모든 공개 하위 모듈이 import되는지 확인한다.
+
+가장 흔한 회귀(re-export 누락·순환 import·선택적 의존성 깨짐)를 빠르게 잡는
+얕고 넓은 안전망. 로직이 아니라 "import 표면이 멀쩡한가"만 본다.
+"""
 
 from __future__ import annotations
 

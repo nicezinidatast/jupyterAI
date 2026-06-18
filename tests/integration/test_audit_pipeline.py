@@ -1,8 +1,12 @@
-"""Real-postgres integration for the outbox → audit_log pipeline.
+"""outbox → audit_log 파이프라인의 실제 postgres 통합 테스트.
 
-We use the actual audit-unit ``OutboxAuditEmitter`` to write an event in the
-same transaction as a domain change, run the consumer's drain loop once, and
-assert the resulting ``audit_log`` row matches.
+audit-unit 의 ``OutboxAuditEmitter`` 로 도메인 변경과 동일 트랜잭션에서 이벤트를 기록하고,
+컨슈머의 drain 루프를 한 번 실행한 뒤, 결과 ``audit_log`` 행이 올바른지 검증한다.
+
+outbox 패턴의 계약:
+  - emit 은 outbox 테이블에 쓰고 즉시 delivered 는 아니다.
+  - _drain_once 가 배치로 outbox 를 읽어 audit_log 로 이관하고 delivered_at 을 설정한다.
+  - drain 은 멱등적이어야 한다(빈 outbox 에서는 0 을 반환한다).
 """
 
 from __future__ import annotations
@@ -14,6 +18,14 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_outbox_emit_then_consumer_drains(fresh_session_factory) -> None:
+    """emit → _drain_once → audit_log 행 생성의 전체 outbox 파이프라인을 검증한다.
+
+    불변식:
+    - emit 직후 outbox 행이 1개 존재하고 delivered_at 이 None 이다.
+    - _drain_once 가 1 을 반환한다(drain 된 항목 수).
+    - drain 후 audit_log 에 올바른 필드 값의 행이 1개 생성된다.
+    - drain 후 outbox 행의 delivered_at 이 채워진다.
+    """
     from audit.consumer import OutboxConsumer
     from audit.emitter import OutboxAuditEmitter
     from audit.models import AuditLog, AuditOutbox
@@ -58,7 +70,11 @@ async def test_outbox_emit_then_consumer_drains(fresh_session_factory) -> None:
 
 
 async def test_consumer_is_idempotent_when_outbox_empty(fresh_session_factory) -> None:
-    """Empty drain returns 0 and never errors."""
+    """빈 outbox 에서 drain 은 0 을 반환하고 오류 없이 종료한다.
+
+    outbox 가 비어 있을 때 컨슈머가 예외를 던지면 백그라운드 루프 전체가 중단된다.
+    이 테스트는 그 안전 계약을 보장한다.
+    """
     from audit.consumer import OutboxConsumer
 
     consumer = OutboxConsumer(fresh_session_factory, batch=10)
@@ -67,7 +83,11 @@ async def test_consumer_is_idempotent_when_outbox_empty(fresh_session_factory) -
 
 
 async def test_consumer_drains_batch_in_order(fresh_session_factory) -> None:
-    """Two events written → drained in insertion order, only once."""
+    """2개 이벤트가 삽입 순서대로 drain 되고, 두 번째 drain 은 0 을 반환함을 검증한다.
+
+    순서 보장: audit_log 의 id 기준 정렬이 outbox 삽입 순서와 일치해야 한다.
+    멱등성: 동일 배치를 두 번 drain 해도 중복 레코드가 생기지 않는다.
+    """
     from audit.consumer import OutboxConsumer
     from audit.emitter import OutboxAuditEmitter
     from audit.models import AuditLog

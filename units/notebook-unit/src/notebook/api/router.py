@@ -1,4 +1,10 @@
-"""notebook-unit public API — workspaces, notebooks, versions, share links."""
+"""notebook-unit 공개 API — 워크스페이스, 노트북, 버전, 공유 링크.
+
+REST 엔드포인트 계층으로, 실제 도메인 로직(멱등 저장·outbox 발신)은
+NotebookService에 위임하고 여기서는 HTTP 입출력 변환만 담당한다.
+공유 링크 조회/생성도 제공하지만, 권한 등급 비교 같은 핵심 불변식은
+ShareLinkManager(서비스 계층)에 있다는 점에 유의한다.
+"""
 
 from __future__ import annotations
 
@@ -65,6 +71,8 @@ async def list_notebooks(session: Session) -> list[NotebookOut]:
     notebooks = (
         await session.execute(select(Notebook).order_by(Notebook.created_at))
     ).scalars().all()
+    # 노트북마다 최신 버전을 따로 조회한다(N+1). 목록 규모가 작다는 전제하의
+    # 단순 구현 — 커지면 윈도우 함수로 묶는 최적화가 필요하다.
     out: list[NotebookOut] = []
     for nb in notebooks:
         latest = (
@@ -110,6 +118,8 @@ async def create_notebook(body: NotebookCreate, session: Session) -> NotebookOut
     )
     await session.flush()
 
+    # 생성 시 내용이 함께 왔으면 첫 버전을 저장하고 Git outbox에도 발신한다.
+    # 빈 노트북이면 버전 없이 메타데이터만 만든다.
     if body.content:
         svc = NotebookService(session)
         await svc.save_and_emit_outbox(
@@ -224,6 +234,7 @@ async def list_share_links(session: Session) -> list[ShareLinkOut]:
 
 @router.get("/share/{link_id}")
 async def resolve_share_link(link_id: UUID, session: Session) -> dict[str, Any]:
+    # 폐기됐거나 없는 링크는 존재 여부를 숨기려 동일하게 404로 응답한다.
     link = await session.get(ShareLink, link_id)
     if link is None or link.revoked_at is not None:
         raise HTTPException(status_code=404, detail="link not found or revoked")

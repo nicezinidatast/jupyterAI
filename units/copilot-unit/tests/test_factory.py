@@ -1,4 +1,4 @@
-"""factory.get_provider — env-driven dispatch."""
+"""factory.get_provider 테스트 — 환경 변수 기반 디스패치."""
 
 from __future__ import annotations
 
@@ -40,12 +40,12 @@ def test_unknown_provider(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_internal_network_overrides_llm_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # INTERNAL_NETWORK wins even when LLM_PROVIDER says anthropic.
+    # LLM_PROVIDER가 anthropic이라 해도 INTERNAL_NETWORK이 우선한다.
     monkeypatch.setenv("INTERNAL_NETWORK", "True")
     monkeypatch.setenv("LLM_PROVIDER", "anthropic")
     monkeypatch.delenv("INTERNAL_LLM_MODEL", raising=False)
     p = get_provider()
-    assert p.name == "internal/gemma4"  # gemma4 is the default model
+    assert p.name == "internal/gemma4"  # gemma4가 기본 모델
 
 
 def test_internal_network_falsey_falls_through(monkeypatch: pytest.MonkeyPatch) -> None:

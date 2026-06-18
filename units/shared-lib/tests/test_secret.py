@@ -1,4 +1,6 @@
-"""Secret brand must never render its plaintext via repr/str/format/pickle/SafeJSON."""
+"""Secret 브랜드가 repr/str/format/pickle/SafeJSON 어느 경로로도 평문을
+드러내지 않음을 검증한다. 누출 벡터마다 한 케이스씩 닫는 보안 회귀 테스트.
+"""
 
 from __future__ import annotations
 
@@ -52,7 +54,7 @@ def test_safe_json_in_list() -> None:
 
 
 def test_safe_json_as_dict_key() -> None:
-    # A Secret used as a key — pathological but worth catching.
+    # Secret을 dict "키"로 쓴 경우 — 병적이지만 막을 가치가 있는 케이스.
     payload = {Secret("hunter2"): "value"}
     with pytest.raises(TypeError, match="Secret"):
         json.dumps(payload, cls=SafeJSONEncoder)
@@ -68,13 +70,13 @@ def test_reveal_returns_plaintext() -> None:
 
 
 def test_default_json_still_leaks_by_design() -> None:
-    """Documents the policy: callers MUST use SafeJSONEncoder for durable sinks.
+    """정책을 명문화한다: 영속 싱크에는 호출자가 반드시 SafeJSONEncoder를 써야 한다.
 
-    Plain ``json.dumps`` would still emit the plaintext because Secret IS a
-    str. The platform's API/log/audit emitters wrap every serialisation in
-    SafeJSONEncoder; this test exists so a future change doesn't accidentally
-    make plain ``json.dumps`` look safe.
+    Secret이 str을 상속하므로 평범한 ``json.dumps``는 여전히 평문을 흘린다.
+    플랫폼의 API·로그·감사 emitter는 모든 직렬화를 SafeJSONEncoder로 감싼다.
+    이 테스트는 "평범한 json.dumps는 안전하지 않다"는 사실을 의도적으로 고정해,
+    훗날 누군가 이 동작을 안전한 것으로 착각해 바꾸지 못하게 하는 가드다.
     """
     s = Secret("hunter2")
     leaked = json.dumps({"pw": s})
-    assert "hunter2" in leaked  # exactly why SafeJSONEncoder exists.
+    assert "hunter2" in leaked  # SafeJSONEncoder가 존재하는 바로 그 이유.

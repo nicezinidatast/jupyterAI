@@ -1,18 +1,22 @@
-"""Pick a :class:`CopilotProvider`.
+"""환경 변수를 보고 :class:`CopilotProvider` 구현을 하나 고른다.
 
-Resolution order:
+선택 순서(resolution order):
 
-1. ``INTERNAL_NETWORK`` truthy (``true``/``1``/``yes``/``on``) →
-   :class:`InternalVLLMProvider` — on-prem vLLM behind Keycloak. The specific
-   model comes from ``INTERNAL_LLM_MODEL`` (``gemma4`` | ``gptoss120b``).
-2. Otherwise fall back to ``LLM_PROVIDER``:
-   * ``anthropic`` → :class:`AnthropicProvider` (requires ``ANTHROPIC_API_KEY``)
-   * ``ollama`` (default for the closed-network demo) → :class:`OllamaProvider`
-   * ``internal`` → :class:`InternalVLLMProvider` (explicit opt-in without the
-     ``INTERNAL_NETWORK`` flag)
+1. ``INTERNAL_NETWORK``이 truthy(``true``/``1``/``yes``/``on``)이면 →
+   :class:`InternalVLLMProvider` — Keycloak 뒤의 온프레미스 vLLM. 구체 모델은
+   ``INTERNAL_LLM_MODEL``(``gemma4`` | ``gptoss120b``)로 정한다.
+2. 그렇지 않으면 ``LLM_PROVIDER``로 폴백:
+   * ``anthropic`` → :class:`AnthropicProvider` (``ANTHROPIC_API_KEY`` 필요)
+   * ``ollama`` (폐쇄망 데모의 기본값) → :class:`OllamaProvider`
+   * ``internal`` → :class:`InternalVLLMProvider` (``INTERNAL_NETWORK`` 플래그
+     없이 명시적으로 내부망 vLLM을 골라 쓰는 경로)
 
-So the on-prem toggle is a single ``INTERNAL_NETWORK=True`` in ``backend/.env``;
-flip it off and everything behaves exactly as before.
+따라서 온프레미스 전환은 ``backend/.env``의 ``INTERNAL_NETWORK=True`` 한 줄로
+끝난다. 이 값을 끄면 모든 동작이 예전 그대로 돌아간다.
+
+프로바이더 import는 함수 안에서 지연(lazy)으로 한다. 안 쓰는 프로바이더의
+SDK(예: anthropic)나 무거운 의존성을 배포·테스트 환경에서 강제로 들이지
+않기 위함이다.
 """
 
 from __future__ import annotations
@@ -51,12 +55,15 @@ def get_provider() -> CopilotProvider:
 
 
 def describe_active() -> dict[str, str | None]:
-    """Non-network summary of the provider :func:`get_provider` would return.
+    """:func:`get_provider`가 돌려줄 프로바이더를, 네트워크 호출 없이 요약한다.
 
-    Used by the backend startup log (so ``docker logs`` shows which model will
-    answer) and by ``python -m copilot.selftest``. Constructs the provider but
-    makes no network call; raises the same errors ``get_provider`` would (e.g.
-    missing ANTHROPIC_API_KEY, unknown INTERNAL_LLM_MODEL).
+    백엔드 기동 로그(``docker logs``에서 어떤 모델이 답할지 보이도록)와
+    ``python -m copilot.selftest``가 쓴다. 프로바이더를 생성만 하고 네트워크
+    호출은 하지 않는다. ``get_provider``와 똑같은 오류를 그대로 던진다(예:
+    ANTHROPIC_API_KEY 미설정, 알 수 없는 INTERNAL_LLM_MODEL).
+
+    ``_model`` / ``_base_url``은 프로토콜에 없는 내부 속성이라
+    :func:`getattr`로 안전하게 꺼낸다(프로바이더마다 있을 수도, 없을 수도 있음).
     """
     p = get_provider()
     return {

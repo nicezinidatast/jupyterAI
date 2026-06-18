@@ -1,4 +1,7 @@
-"""notebook-unit schema.
+"""notebook-unit 스키마(초기 마이그레이션).
+
+models.py의 테이블을 그대로 생성한다. 모델 쪽 제약(CheckConstraint·XOR 등)과
+짝을 맞춰 두므로, 모델을 바꾸면 이 마이그레이션도 함께 갱신해야 한다.
 
 Revision ID: 0001_notebook_initial
 """
@@ -18,6 +21,8 @@ _JSON = sa.dialects.postgresql.JSONB
 
 
 def upgrade() -> None:
+    # 외래키 의존 순서대로 생성: workspaces → notebooks → versions → outbox →
+    # share_links → share_audience. downgrade는 역순으로 떨어뜨린다.
     op.create_table(
         "workspaces",
         sa.Column("workspace_id", _UUID, primary_key=True),
@@ -112,6 +117,7 @@ def upgrade() -> None:
         ),
         sa.Column("subject_user_id", _UUID, primary_key=True),
         sa.Column("subject_role", sa.String(32), primary_key=True),
+        # XOR 제약: user_id와 role 중 하나만 채워졌음을 강제한다.
         sa.CheckConstraint(
             "(subject_user_id IS NULL) <> (subject_role IS NULL)",
             name="ck_audience_subject_xor",

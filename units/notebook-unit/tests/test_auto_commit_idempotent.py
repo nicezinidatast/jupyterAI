@@ -1,4 +1,8 @@
-"""Saving identical content twice yields a single notebook_version row."""
+"""같은 내용을 두 번 저장해도 notebook_version 행이 하나만 생기는지 검증.
+
+NotebookService의 멱등성(동일 SHA-256은 새 버전·outbox를 만들지 않음)과
+내용이 바뀌면 새 버전이 생기는 동작을 함께 확인한다.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +29,7 @@ async def session() -> AsyncIterator[AsyncSession]:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as s:
-        # Seed a workspace + notebook.
+        # 테스트용 워크스페이스 + 노트북을 미리 심는다.
         ws_id = uuid4()
         nb_id = uuid4()
         s.add(
@@ -47,11 +51,13 @@ async def session() -> AsyncIterator[AsyncSession]:
             )
         )
         await s.commit()
+        # 테스트 편의를 위해 세션 객체에 노트북 id를 붙여 둔다.
         s.notebook_id = nb_id  # type: ignore[attr-defined] — convenience for tests
         yield s
     await engine.dispose()
 
 
+# 동일 내용 반복 저장 → 같은 version_id 반환, 행은 하나만.
 async def test_identical_save_is_idempotent(session: AsyncSession) -> None:
     svc = NotebookService(session)
     user = uuid4()
@@ -69,7 +75,7 @@ async def test_identical_save_is_idempotent(session: AsyncSession) -> None:
     )
     await session.commit()
     assert r1.ok and r2.ok
-    assert r1.value == r2.value  # same version id returned
+    assert r1.value == r2.value  # same version id returned (같은 버전 id가 돌아온다)
 
     versions = await session.scalar(select(func.count()).select_from(NotebookVersion))
     outbox = await session.scalar(select(func.count()).select_from(GitCommitOutbox))
@@ -77,6 +83,7 @@ async def test_identical_save_is_idempotent(session: AsyncSession) -> None:
     assert outbox == 1
 
 
+# 내용이 달라지면 새 버전 + 새 outbox 행이 각각 생긴다.
 async def test_changed_content_creates_new_version(session: AsyncSession) -> None:
     svc = NotebookService(session)
     user = uuid4()
@@ -97,6 +104,7 @@ async def test_changed_content_creates_new_version(session: AsyncSession) -> Non
     assert outbox == 2
 
 
+# 지문 해시는 dict 키 순서에 영향받지 않아야 멱등 비교가 성립한다.
 def test_content_sha256_is_dict_order_independent() -> None:
     a = {"a": 1, "b": 2}
     b = {"b": 2, "a": 1}

@@ -1,7 +1,9 @@
-"""OpenTelemetry tracing wrapper (NFR-SL-OBS-03).
+"""OpenTelemetry 트레이싱 래퍼 (NFR-SL-OBS-03).
 
-When ``otlp_endpoint`` is empty the SDK still installs a no-op provider so the
-import is cheap; production deployments set the endpoint via env.
+``otlp_endpoint``가 비어 있으면 익스포터 없이 프로바이더만 설치하므로 사실상
+no-op(아무 곳에도 안 보냄)이라 import·구성 비용이 싸다. 운영 배포에서만 env로
+엔드포인트를 지정해 실제 수집기로 스팬을 보낸다. 덕분에 로컬·테스트 환경은
+트레이싱 인프라 없이도 그대로 돌아간다.
 """
 
 from __future__ import annotations
@@ -15,12 +17,13 @@ _configured = False
 
 
 def configure_tracing(service_name: str, otlp_endpoint: str | None = None) -> None:
-    """Idempotent — subsequent calls update only resource attributes."""
+    """멱등(idempotent) — 다시 호출하면 리소스 속성만 갱신한다."""
     global _configured
     resource = Resource.create({"service.name": service_name})
     provider = TracerProvider(resource=resource)
     if otlp_endpoint:
-        # Import here so projects without the OTLP exporter can still import the module.
+        # OTLP 익스포터 패키지가 깔려 있지 않은 프로젝트도 이 모듈 자체는
+        # import할 수 있도록, 익스포터는 엔드포인트가 있을 때만 지연 import한다.
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter,
         )

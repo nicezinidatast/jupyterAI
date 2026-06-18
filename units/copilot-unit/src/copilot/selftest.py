@@ -1,15 +1,15 @@
-"""One-shot copilot self-test — confirm the configured LLM actually answers.
+"""코파일럿 1회용 자가 점검(self-test) — 설정된 LLM이 실제로 답하는지 확인한다.
 
-Run it inside the backend container (which has the ``copilot`` package + the
-same env the app uses)::
+백엔드 컨테이너(``copilot`` 패키지와 앱이 쓰는 동일한 환경을 갖춘) 안에서
+실행한다::
 
     docker compose -f infra/docker-compose/compose.yml exec backend \
         python -m copilot.selftest
 
-It prints the resolved provider/model/endpoint, fires a single streaming
-round-trip with a fixed Korean prompt, streams the answer, and exits non-zero
-on any failure — so it doubles as a connectivity / credential / model-id smoke
-check on the internal network.
+해석된 프로바이더/모델/엔드포인트를 출력하고, 고정된 한국어 프롬프트로 스트리밍
+왕복(round-trip)을 한 번 날려 답을 흘려 보여 준 뒤, 어떤 실패든 0이 아닌 종료
+코드로 끝낸다 — 그래서 내부망에서의 연결성/자격증명/model-id 스모크 점검
+(smoke check)을 겸한다.
 """
 
 from __future__ import annotations
@@ -24,7 +24,8 @@ _PROMPT = "안녕하세요, 너는 어떤 LLM이니? 한 문장으로 답해줘.
 
 
 async def _run() -> int:
-    # Korean output safety on Windows consoles (no-op in the linux container).
+    # Windows 콘솔에서 한국어 출력이 깨지지 않게 UTF-8로 재설정한다(리눅스
+    # 컨테이너에서는 사실상 무의미한 동작이지만, 실패해도 그냥 넘어간다).
     try:
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001

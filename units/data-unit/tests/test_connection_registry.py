@@ -1,12 +1,11 @@
-"""PBT — RBAC invariant: a connection without a matching grant is invisible.
+"""PBT — RBAC 불변식: 매칭되는 grant가 없는 연결은 보이지 않는다.
 
-The connection_grants table is the authoritative ACL. A user (or any role
-they hold) must have at least one grant whose ``action`` covers the requested
-operation; otherwise the connection is filtered out of list() and access is
-denied to get().
+connection_grants 테이블이 권위 있는 ACL(접근 제어 목록)이다. 사용자(또는 그가
+가진 임의 역할)는 요청한 작업을 포괄하는 ``action``의 grant를 최소 하나는 가져야
+한다. 그렇지 않으면 그 연결은 list()에서 걸러지고 get() 접근도 거부된다.
 
-This unit test exercises the ACL filtering in isolation, with sqlite as the
-backing store; the real registry service uses the same SQL.
+이 단위 테스트는 ACL 필터링만 떼어내(in isolation) 검증하며, 백킹 저장소로
+sqlite를 쓴다. 실제 레지스트리 서비스도 같은 SQL을 사용한다.
 """
 
 from __future__ import annotations
@@ -59,8 +58,8 @@ async def _seed_connection(session: AsyncSession, *, name: str = "db1") -> UUID:
 
 
 async def _list_visible_for(session: AsyncSession, *, user_id: UUID, roles: tuple[str, ...]) -> list[UUID]:
-    """The RBAC-aware listing query the real service uses (kept inline so the
-    test pins the SQL shape directly)."""
+    """실제 서비스가 쓰는 RBAC 인지(aware) 목록 질의. 테스트가 SQL 모양을 직접
+    못 박도록 인라인으로 둔다(서비스 코드와 어긋나면 테스트가 깨지게)."""
     role_list = list(roles)
     stmt = (
         select(Connection.connection_id)
@@ -80,10 +79,9 @@ async def _list_visible_for(session: AsyncSession, *, user_id: UUID, roles: tupl
 
 
 async def test_no_grant_means_invisible(session: AsyncSession) -> None:
-    """Invariant: a user with no grant sees zero connections — no matter how
-    many connections exist in the table."""
+    """불변식: grant가 없는 사용자는 테이블에 연결이 아무리 많아도 0개만 본다."""
     user_id = uuid4()
-    # Seed three connections, none of which the user has a grant for.
+    # 사용자가 grant를 갖지 않은 연결 3개를 심는다.
     for i in range(3):
         await _seed_connection(session, name=f"db{i}")
     await session.commit()
@@ -131,7 +129,7 @@ async def test_role_grant_makes_visible(session: AsyncSession) -> None:
 @given(n_conns=st.integers(min_value=1, max_value=20))
 @settings(max_examples=20, deadline=None)
 async def test_pbt_no_grants_means_zero_visible(n_conns: int) -> None:
-    """PBT: for any number of connections, a user with no grants sees nothing."""
+    """PBT: 연결 개수가 몇이든, grant가 없는 사용자에게는 아무것도 보이지 않는다."""
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:", connect_args={"check_same_thread": False}
     )

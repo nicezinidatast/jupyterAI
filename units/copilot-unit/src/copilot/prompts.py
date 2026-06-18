@@ -1,8 +1,11 @@
-"""System prompt builder for the analyst copilot.
+"""분석가용 코파일럿의 시스템 프롬프트 빌더.
 
-Per FR-LLM-05, only **metadata** (table + column names + types) is included in
-the prompt — never row values. Callers that want to summarise rows must do so
-client-side or via a separate, audited "row-summary" endpoint.
+FR-LLM-05에 따라, 프롬프트에는 **메타데이터**(테이블·컬럼 이름과 타입)만 담고
+실제 행(row) 값은 절대 넣지 않는다. 행을 요약하고 싶은 호출자는 클라이언트
+쪽에서 처리하거나, 별도의 감사되는(audited) "row-summary" 엔드포인트를 써야 한다.
+
+주의: 아래 ``_BASE_PROMPT`` 등 프롬프트 문자열은 LLM 동작에 직결되는 기능성
+데이터이므로 번역·수정하지 않는다(원문 영어 그대로 유지).
 """
 
 from __future__ import annotations
@@ -33,17 +36,20 @@ def build_system_prompt(
     connection_engine: str,
     schema: dict[str, Any] | None,
 ) -> str:
-    """Assemble the system prompt with the schema appended.
+    """기본 프롬프트 뒤에 스키마를 덧붙여 시스템 프롬프트를 조립한다.
 
-    ``schema`` is the response from ``GET /api/connections/{id}/schema`` —
-    a dict with a ``tables`` list. Pass ``None`` when the user hasn't picked
-    a connection yet.
+    ``schema``는 ``GET /api/connections/{id}/schema``의 응답으로, ``tables``
+    리스트를 담은 dict다. 사용자가 아직 연결(connection)을 고르지 않았으면
+    ``None``을 넘긴다 — 이 경우 DB 없이 파일 기반 워크플로용 안내를 덧붙인다.
     """
     parts = [_BASE_PROMPT.strip(), f"Active engine: {connection_engine or 'unknown'}"]
     if schema:
         parts.append("\nSCHEMA")
         for t in schema.get("tables", []):
+            # 스키마명이 있으면 "schema.table"로 한정(qualify)하고, 없으면 테이블명만.
             qualified = f"{t.get('schema')}.{t['name']}" if t.get("schema") else t["name"]
+            # 컬럼은 "이름:타입" 형식. PII로 분류된 컬럼엔 [PII] 표식을 붙여
+            # 모델이 그 컬럼 값을 에코하지 않도록 신호를 준다(값 자체는 미포함).
             cols = ", ".join(
                 f"{c['name']}:{c['type']}{' [PII]' if c.get('pii_kind') else ''}"
                 for c in t.get("columns", [])

@@ -3,10 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 브라우저 탭에 표시되는 제목 -->
     <title>Dataplatform Auditor</title>
   </head>
   <body>
+    <!-- React 앱이 마운트될 루트 DOM 노드. main.tsx 에서 getElementById('root') 로 참조한다. -->
     <div id="root"></div>
+    <!-- Vite 가 번들링한 진입점 모듈. type="module" 이어야 ES 모듈 트리 쉐이킹이 동작한다. -->
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

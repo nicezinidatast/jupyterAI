@@ -1,4 +1,26 @@
 <!doctype html>
+<!--
+  포털 랜딩 페이지 — Nginx가 "/" 경로로 서빙하는 단일 정적 HTML이다.
+
+  역할:
+    사용자가 처음 접속했을 때 역할(페르소나)별 진입점 카드를 보여준다.
+    백엔드·JupyterLab·인증이 모두 같은 도메인(포트 5500)에 있으므로
+    별도 리다이렉트 없이 href만으로 각 화면으로 이동할 수 있다.
+
+  이 파일이 정적 HTML인 이유:
+    로그인 전에도 접근 가능해야 하고, JS 프레임워크 없이 Nginx만으로
+    제공할 수 있어야 한다. 카드 클릭 후의 인증은 각 서브경로(/analyst/, /admin/ 등)가 담당한다.
+
+  카드 구성:
+    - /analyst/  : JupyterLab + SQL 작업대 — 분석가 메인 화면
+    - /admin/    : 사용자·커넥션·PII 관리 — 운영자 콘솔
+    - /auditor/  : 감사 로그 읽기 전용 — 보안/감사관용
+    - /api/      : 백엔드 REST API 직접 접근
+
+  디자인 결정:
+    CSS 변수(:root)로 색·여백 토큰을 정의해 유지보수성을 높였다.
+    외부 CSS/JS 의존성 없이 인라인 스타일만 사용한다(오프라인 내부망 배포 고려).
+-->
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
@@ -97,6 +119,7 @@
   </header>
 
   <main>
+    <!-- 분석가 진입점: JupyterLab SPA 임베드 + SQL 작업대 -->
     <a class="card" href="/analyst/">
       <span class="emoji">🧪</span>
       <span class="role">Analyst</span>
@@ -104,6 +127,7 @@
       <p class="desc">JupyterLab 풀 UI 임베드 + 빠른 SQL 작업대 + 내 노트북 버전 관리. 분석가의 메인 화면.</p>
     </a>
 
+    <!-- 운영자 진입점: 사용자·커넥션·PII 패턴 관리 -->
     <a class="card" href="/admin/">
       <span class="emoji">🛠️</span>
       <span class="role">Admin</span>
@@ -111,6 +135,7 @@
       <p class="desc">사용자/역할 · 데이터 커넥션 · PII 패턴 · 백업 이력 관리. 운영자 콘솔.</p>
     </a>
 
+    <!-- 감사관 진입점: 읽기 전용 감사 로그 조회 -->
     <a class="card" href="/auditor/">
       <span class="emoji">🔍</span>
       <span class="role">Auditor</span>
@@ -118,6 +143,7 @@
       <p class="desc">감사 로그 검색·필터·CSV 내보내기. 보안/감사관용 읽기 전용 콘솔.</p>
     </a>
 
+    <!-- API 직접 접근: Swagger UI 또는 REST 클라이언트용 -->
     <a class="card" href="/api/">
       <span class="emoji">🔌</span>
       <span class="role">API</span>

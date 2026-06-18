@@ -3,9 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 관리자 콘솔 SPA 진입점.
+         Vite가 빌드 시 /src/main.tsx를 번들링해 이 script 태그를 교체한다.
+         nginx는 /admin/ 경로를 이 파일로 서빙하고,
+         나머지 경로는 404 대신 이 파일로 fallback시켜 클라이언트 라우팅이 동작하게 한다. -->
     <title>Dataplatform Admin</title>
   </head>
   <body>
+    <!-- React가 마운트할 루트 DOM 노드. id="root"는 main.tsx의 getElementById와 일치해야 한다. -->
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

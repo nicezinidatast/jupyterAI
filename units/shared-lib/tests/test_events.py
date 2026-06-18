@@ -1,4 +1,4 @@
-"""DomainEvent round-trip + Secret rejection."""
+"""DomainEvent 왕복(round-trip) 직렬화 + Secret 거부 검증."""
 
 from __future__ import annotations
 
@@ -41,6 +41,7 @@ def test_make_event_rejects_secret_in_payload() -> None:
 
 
 def test_make_event_rejects_nested_secret() -> None:
+    # 최상위뿐 아니라 중첩 dict 깊숙이 숨은 Secret도 잡아야 한다(재귀 스크럽).
     with pytest.raises(ValueError, match="Secret"):
         make_event(
             type="x",
@@ -58,7 +59,10 @@ def test_make_event_rejects_nested_secret() -> None:
     corr_id=st.text(min_size=1, max_size=32),
 )
 def test_make_event_round_trip(type_: str, actor: str, result: str, corr_id: str) -> None:
-    """make_event → json → dict yields the same data (modulo string typing)."""
+    """make_event → json → dict가 같은 데이터를 내는지 확인(문자열 타입 차이 제외).
+
+    봉투가 표준 json으로 손실 없이 직렬화·역직렬화됨을 보장 — 큐·DB 이식성의 근거.
+    """
     e = make_event(
         type=type_, actor=actor, result=result, corr_id=corr_id, payload={"k": 1}
     )

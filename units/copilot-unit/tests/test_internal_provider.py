@@ -1,9 +1,9 @@
-"""InternalVLLMProvider — offline token + SSE streaming, no real network.
+"""InternalVLLMProvider 테스트 — 오프라인 토큰 + SSE 스트리밍, 실제 네트워크 없음.
 
-We monkeypatch ``httpx.AsyncClient`` to inject a ``MockTransport`` so both the
-Keycloak token POST and the OpenAI-compatible streaming call are served from a
-handler. This verifies the real two-step flow (mint token → stream deltas)
-without touching the internal network.
+``httpx.AsyncClient``를 몽키패치해 ``MockTransport``를 주입한다. 그러면
+Keycloak 토큰 POST와 OpenAI 호환 스트리밍 호출이 모두 하나의 핸들러에서
+응답된다. 내부망을 건드리지 않고도 실제 2단계 흐름(토큰 발급 → 델타 스트리밍)을
+검증할 수 있다.
 """
 
 from __future__ import annotations
@@ -18,9 +18,9 @@ from copilot.providers.internal import InternalVLLMProvider
 
 
 def _install_mock(monkeypatch: pytest.MonkeyPatch, handler) -> dict:
-    """Route every httpx.AsyncClient through MockTransport(handler).
+    """모든 httpx.AsyncClient를 MockTransport(handler)로 통과시키게 만든다.
 
-    Returns a dict the handler can mutate to record what it saw.
+    핸들러가 본 것을 기록할 수 있도록, 변경 가능한 dict를 돌려준다.
     """
     seen: dict = {"token_calls": 0, "chat_payloads": []}
     real = httpx.AsyncClient
@@ -39,7 +39,7 @@ def _default_handler(req: httpx.Request, seen: dict) -> httpx.Response:
         return httpx.Response(
             200, json={"access_token": "tok-abc", "expires_in": 300}
         )
-    # chat/completions — assert bearer + capture payload, return SSE deltas.
+    # chat/completions — 베어러 토큰 확인 + 페이로드 캡처, SSE 델타 반환.
     assert req.headers.get("Authorization") == "Bearer tok-abc"
     seen["chat_payloads"].append(json.loads(req.content))
     body = (
@@ -73,10 +73,10 @@ async def test_stream_mints_token_then_relays_deltas(
 
     assert text == "Hello, world"
     assert seen["token_calls"] == 1
-    # gemma4 → correct model id + streaming flag in the request body.
+    # gemma4 → 요청 본문에 올바른 model id와 스트리밍 플래그가 실린다.
     assert seen["chat_payloads"][0]["model"] == "gemma4-31b-vllm"
     assert seen["chat_payloads"][0]["stream"] is True
-    # system prompt is sent as the leading system message.
+    # 시스템 프롬프트는 맨 앞 system 메시지로 전송된다.
     assert seen["chat_payloads"][0]["messages"][0] == {
         "role": "system",
         "content": "be terse",
@@ -89,8 +89,8 @@ async def test_token_cached_across_calls(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("INTERNAL_LLM_MODEL", "gemma4")
     seen = _install_mock(monkeypatch, _default_handler)
 
-    # Two separate provider instances (mirrors the per-request factory) must
-    # share one minted token.
+    # 서로 다른 프로바이더 인스턴스 두 개(요청마다 새로 만드는 팩토리를 모사)가
+    # 발급된 토큰 하나를 공유해야 한다.
     await _collect(InternalVLLMProvider())
     await _collect(InternalVLLMProvider())
 
@@ -115,8 +115,8 @@ async def test_gptoss_uses_its_own_model_id(
 async def test_edit_model_override_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # edit-cell passes COPILOT_EDIT_MODEL (a Claude id) as model=; the internal
-    # provider must NOT forward it to vLLM.
+    # edit-cell은 COPILOT_EDIT_MODEL(Claude id)을 model=로 넘긴다. 내부망
+    # 프로바이더는 그걸 vLLM으로 전달하면 안 된다(자기 모델 id를 써야 함).
     internal._token_cache.clear()
     monkeypatch.setenv("INTERNAL_LLM_MODEL", "gemma4")
     seen = _install_mock(monkeypatch, _default_handler)

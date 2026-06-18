@@ -1,6 +1,10 @@
-"""Credential schema.
+"""Credential 스키마 초기 마이그레이션.
 
 Revision ID: 0001_credentials
+
+credentials 테이블과 partial index를 생성한다.
+partial index(idx_credentials_owner)는 삭제되지 않은 행에 대해서만 owner_user_id를 인덱싱해
+개인 Credential 목록 조회 성능을 확보한다.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ def upgrade() -> None:
         ),
         sa.UniqueConstraint("scope", "owner_user_id", "name", name="uq_cred_name"),
     )
+    # deleted_at IS NULL 조건의 partial index — 활성 행만 인덱싱해 인덱스 크기를 최소화한다.
     op.create_index(
         "idx_credentials_owner",
         "credentials",

@@ -1,7 +1,8 @@
-"""Prometheus metrics helpers (NFR-SL-OBS-01).
+"""Prometheus 메트릭 헬퍼 (NFR-SL-OBS-01).
 
-Two cross-unit metrics are pre-declared; per-unit metrics live in each unit.
-Metric names follow ``<unit>_<concept>_<unit_of_measure>``.
+플랫폼 전역에서 공통으로 쓰는 두 메트릭(요청 수·요청 지연)을 미리 선언해 둔다.
+단위별 고유 메트릭은 각 단위에 둔다. 메트릭 이름은
+``<unit>_<concept>_<unit_of_measure>`` 규칙을 따라 일관성을 유지한다.
 """
 
 from __future__ import annotations
@@ -14,7 +15,9 @@ from prometheus_client import (
     generate_latest,
 )
 
-# A dedicated registry isolates platform metrics from any 3rd-party defaults.
+# 전용 레지스트리를 두는 이유: prometheus_client의 전역 기본 레지스트리에
+# 섞이면 서드파티 라이브러리가 등록한 메트릭과 충돌하거나 중복 등록 에러가
+# 날 수 있다. 플랫폼 메트릭만 격리해 /metrics 출력을 깨끗하게 유지한다.
 REGISTRY = CollectorRegistry(auto_describe=True)
 
 REQUEST_COUNT: Counter = Counter(
@@ -34,5 +37,9 @@ REQUEST_LATENCY: Histogram = Histogram(
 
 
 def metrics_endpoint() -> tuple[bytes, str]:
-    """Return ``(body, content_type)`` for a Prometheus /metrics handler."""
+    """Prometheus /metrics 핸들러용 ``(body, content_type)`` 튜플을 반환한다.
+
+    프레임워크에 묶이지 않도록 raw 바이트와 콘텐츠 타입만 돌려준다 — 각 단위는
+    이 값을 자기 웹 프레임워크의 응답으로 감싸기만 하면 된다.
+    """
     return generate_latest(REGISTRY), CONTENT_TYPE_LATEST

@@ -1,4 +1,8 @@
-"""PII masking — oracle, idempotent, and PBT against a regex oracle."""
+"""PII 마스킹 테스트 — 예시 기반 검증, 멱등성, 그리고 정규식 오라클 대상 PBT.
+
+PBT(Property-Based Test, 속성 기반 테스트)는 무작위 입력을 생성해 불변식을
+검증한다. 여기서는 "마스킹 결과에 원본 로컬 파트가 남지 않는다"는 속성을 건다.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +22,7 @@ from data.services.pii_masking import (
 def test_mask_name() -> None:
     assert apply_mask("홍길동", "name") == "홍*동"
     assert apply_mask("이순신", "name") == "이*신"
-    assert apply_mask("김", "name") == "김"  # too short → unchanged
+    assert apply_mask("김", "name") == "김"  # 너무 짧음(성만 있음) → 변경 없음
 
 
 def test_mask_phone_with_or_without_dashes() -> None:
@@ -35,7 +39,7 @@ def test_mask_email() -> None:
 
 
 def test_idempotent_apply_mask() -> None:
-    """apply_mask(apply_mask(x)) == apply_mask(x) for every supported kind."""
+    """멱등성 검증: 지원하는 모든 종류에서 apply_mask(apply_mask(x)) == apply_mask(x)."""
     cases: list[tuple[str, str]] = [
         ("홍길동", "name"),
         ("010-1234-5678", "phone"),
@@ -62,8 +66,8 @@ def test_idempotent_apply_mask() -> None:
 def test_pbt_masked_email_never_contains_local_part(user: str, domain: str) -> None:
     email = f"{user}@{domain}.com"
     masked = apply_mask(email, "email")
-    # Only the first character of ``user`` may appear before ``***`` — the rest
-    # must not appear in the masked output.
+    # ``user``의 첫 글자만 ``***`` 앞에 남을 수 있고, 나머지는 마스킹 결과에
+    # 절대 나타나면 안 된다(로컬 파트 누설 금지 불변식).
     rest = user[1:]
     if rest:
         assert rest not in masked
@@ -74,7 +78,7 @@ def test_mask_row_uses_detection() -> None:
     masked = mask_row(row, column_kinds={"name": "name", "phone": "phone", "city": None})
     assert masked["name"] == "홍*동"
     assert masked["phone"] == "010-****-5678"
-    assert masked["city"] == "Seoul"  # not PII
+    assert masked["city"] == "Seoul"  # PII 아님 → 원본 유지
 
 
 def test_validate_regex_rejects_catastrophic_pattern() -> None:

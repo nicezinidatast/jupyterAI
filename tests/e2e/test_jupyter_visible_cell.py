@@ -1,14 +1,14 @@
-"""End-to-end test for the FULL user-visible round-trip:
+"""사용자가 실제로 보는 전체 왕복 경로의 end-to-end 테스트.
 
-    NL question → Anthropic streaming → ```sql``` code block in answer
-                → auto-insert PUT to copilot.ipynb
-                → JupyterLab iframe reloads
-                → the new cell's source ("sales.customers") is actually
-                  visible inside the embedded JupyterLab UI
+    자연어 질문 → Anthropic 스트리밍 → ```sql``` 코드 블록 포함 답변
+                → 자동 삽입 PUT → copilot.ipynb 갱신
+                → JupyterLab iframe 리로드
+                → 새 셀의 소스("sales.customers")가 임베디드 JupyterLab UI 에서
+                  실제로 *보여야* 한다
 
-This is what the user means by "코드 바로 주피터 셀에 삽입되게 해달라". The
-older `test_copilot_integration.py` only proves the server-side PUT/audit
-trail; this one also proves the iframe shows the cell to the analyst.
+이것이 사용자가 "코드 바로 주피터 셀에 삽입되게 해달라"고 요청했을 때의 의도다.
+기존 test_copilot_integration.py 는 서버 측 PUT/audit 경로만 증명하지만,
+이 테스트는 iframe 에서 셀이 분석가에게 실제로 보임을 추가로 증명한다.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ NOTEBOOK = "copilot.ipynb"
 
 
 def _portal_reachable() -> bool:
+    """portal /healthz 가 8초 이내에 200을 반환하면 True를 반환한다."""
     try:
         with urllib.request.urlopen(f"{PORTAL_URL}/healthz", timeout=8) as r:
             return r.status == 200
@@ -35,6 +36,7 @@ def _portal_reachable() -> bool:
 
 
 def _anthropic_configured() -> bool:
+    """GET /api/copilot/provider 가 provider='anthropic' 를 반환하면 True를 반환한다."""
     try:
         with httpx.Client(timeout=8.0) as c:
             r = c.get(f"{PORTAL_URL}/api/copilot/provider")
@@ -56,6 +58,10 @@ pytestmark = [
 
 
 def _reset_notebook() -> None:
+    """테스트 전에 copilot.ipynb 를 삭제하여 깨끗한 상태로 만든다.
+
+    404 는 이미 없는 경우이므로 무시한다.
+    """
     httpx.delete(
         f"{JUPYTER_BASE}/api/contents/{NOTEBOOK}",
         headers={"Authorization": f"token {JUPYTER_TOKEN}"},
@@ -64,6 +70,16 @@ def _reset_notebook() -> None:
 
 
 def test_inserted_cell_visible_in_jupyterlab_iframe() -> None:
+    """자동 삽입된 셀이 JupyterLab iframe UI 에서 실제로 보임을 검증한다.
+
+    검증하는 불변식:
+    - "자동 추가됨" 배지가 나타난다(PUT 완료 신호).
+    - iframe 이 리마운트되고 copilot.ipynb 가 열려 셀 내용이 렌더링된다.
+    - CodeMirror 셀 에디터에 "sales.customers" 텍스트가 실제로 나타난다.
+
+    이 테스트는 test_copilot_integration.py 의 서버 측 증거에 더해,
+    JupyterLab UI 에서 셀이 분석가에게 *보임*을 추가로 보장한다.
+    """
     _reset_notebook()
 
     with sync_playwright() as p:
@@ -77,8 +93,8 @@ def test_inserted_cell_visible_in_jupyterlab_iframe() -> None:
                 timeout=60_000
             )
 
-            # Ask a question that will deterministically include "sales.customers"
-            # inside a ```sql``` fence so we know what text to look for in the UI.
+            # UI 에서 찾을 텍스트("sales.customers")가 답변에 반드시 포함되도록
+            # 명확하게 SQL 펜스 형식을 강제하는 질문을 전송한다.
             question = (
                 "Postgres SQL 한 줄을 ```sql ... ``` 형식으로만 답하세요. "
                 "다른 설명은 절대 포함하지 마세요. "
@@ -89,7 +105,7 @@ def test_inserted_cell_visible_in_jupyterlab_iframe() -> None:
             chat_input.fill(question)
             page.locator("button").filter(has_text="보내기").first.click()
 
-            # Auto-insert badge appears once the PUT lands.
+            # PUT 완료 후 자동 삽입 배지가 나타난다.
             expect(
                 page.get_by_text("자동 추가됨", exact=False).first
             ).to_be_visible(timeout=60_000)
@@ -97,18 +113,17 @@ def test_inserted_cell_visible_in_jupyterlab_iframe() -> None:
                 page.get_by_text("셀이 copilot.ipynb 에 추가됨", exact=False)
             ).to_be_visible(timeout=15_000)
 
-            # The iframe reload is driven by the parent bumping its key — give
-            # JupyterLab time to remount, open copilot.ipynb, and paint cells.
+            # iframe 리로드는 부모 컴포넌트가 key 를 바꿔 트리거한다.
+            # JupyterLab 이 리마운트되고 copilot.ipynb 를 열고 셀을 그릴 때까지 대기한다.
             jupyter = page.frame_locator("iframe[title='JupyterLab']")
 
-            # Confirm lab actually mounted (the file-menu button is a reliable
-            # "lab is alive" marker).
+            # 파일 메뉴 버튼(또는 노트북 툴바)이 나타나면 Lab 이 살아 있다는 신호다.
             expect(jupyter.locator("#jp-MainLogo, .jp-NotebookPanel-toolbar").first).to_be_visible(
                 timeout=60_000
             )
 
-            # The cell source is rendered by CodeMirror inside the notebook.
-            # Wait for "sales.customers" to actually be present in the iframe DOM.
+            # 셀 소스는 노트북 내부의 CodeMirror 에 의해 렌더링된다.
+            # iframe DOM 에 "sales.customers" 가 실제로 나타날 때까지 기다린다.
             cell_text = jupyter.get_by_text("sales.customers", exact=False).first
             expect(cell_text).to_be_visible(timeout=60_000)
         finally:
