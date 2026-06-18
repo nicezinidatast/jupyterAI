@@ -127,10 +127,9 @@ const api = {
       // 백엔드는 { user: {...} } 로 감싸 내려주므로, UI가 쓰는 평면 Me로 푼다.
       return r.json().then((d) => {
         const u = d.user as Me;
-        // 분석가마다 전용 copilot 노트북(copilot-<id>.ipynb)을 갖게 한다 —
-        // 사용자 식별이 가능한 가장 이른 시점이 여기(me 응답)이므로 여기서
-        // 사용자별 노트북 경로/작업 폴더 전역값을 확정한다.
-        setCopilotNotebookForUser(u?.email);
+        // 사용자별 JupyterHub 서버 베이스를 확정한다. 허브 사용자명은 user_id(UUID)이며,
+        // 사용자 식별이 가능한 가장 이른 시점이 여기(me 응답)이다.
+        setCopilotNotebookForUser(u?.user_id);
         return u;
       });
     }),
@@ -660,14 +659,23 @@ function JupyterLab({ connectionId }: { connectionId: string | null }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // 사용자별 JupyterHub 서버로 들어간다. httpOnly 세션 쿠키는 JS가 직접 못 읽으므로
+      // 백엔드에서 허브 로그인용 단기 토큰을 받아 허브의 토큰 SSO 로그인으로 넘긴다.
+      // 허브가 토큰을 검증하고 사용자별 컨테이너를 스폰한 뒤 그 사람의 Lab으로 보낸다.
+      let token = '';
       try {
-        await ensureUserDir();
+        const r = await fetch('/api/auth/jupyter-token', { credentials: 'include' });
+        if (r.ok) token = ((await r.json()) as { token?: string }).token ?? '';
       } catch {
-        /* 폴더 생성 실패 — Jupyter 루트로 폴백한다(USER_DIR 빈 값). */
+        /* 토큰 발급 실패 — 토큰 없이 시도(허브가 거부하면 사용자가 재로그인) */
       }
       if (cancelled) return;
-      const tree = USER_DIR ? `/tree/${USER_DIR}` : '';
-      setSrc(`/jupyter/lab${tree}?token=${JUPYTER_TOKEN}&reset`);
+      // next는 본인 서버의 Lab. 첫 스폰은 컨테이너 기동에 시간이 걸려 허브의
+      // "서버 시작 중" 화면이 잠깐 보였다가 Lab으로 전환된다.
+      const next = `${JUPYTER_USER_BASE}/lab`;
+      setSrc(
+        `/jupyter/hub/login?platform_token=${encodeURIComponent(token)}&next=${encodeURIComponent(next)}`,
+      );
     })();
     return () => {
       cancelled = true;
@@ -732,59 +740,36 @@ function JupyterLab({ connectionId }: { connectionId: string | null }) {
 // 주의: 이 4개 값은 모듈 전역 가변 상태다. setCopilotNotebookForUser가 me
 // 응답 시점에 한 번 덮어쓰면, 이후 모든 Jupyter contents API 호출이 같은
 // 사용자별 경로를 바라본다(REST 헬퍼들이 이 전역을 직접 참조).
-let COPILOT_NOTEBOOK = 'copilot.ipynb'; // Jupyter 루트 기준 전체 경로
-let COPILOT_NOTEBOOK_NAME = 'copilot.ipynb'; // 파일명(basename)만
-let USER_DIR = ''; // '' = Jupyter 루트. 사용자 확정 시 work/<id>로 설정
-const JUPYTER_TOKEN = 'dataplatform';
-let COPILOT_NOTEBOOK_URL = `/jupyter/api/contents/${COPILOT_NOTEBOOK}`;
+// 사용자별 JupyterHub 서버의 베이스 경로. /me의 user_id(=허브 사용자명)로 확정된다.
+// 사용자마다 컨테이너가 분리되므로 서버 루트(/home/jovyan/work)가 곧 개인 공간 →
+// copilot 노트북은 루트의 copilot.ipynb 하나면 충분하다(work/<id> 하위폴더·공유 토큰 불필요).
+let JUPYTER_USER_BASE = '/jupyter'; // 확정 전 임시. 확정 후 /jupyter/user/<id>
+let COPILOT_NOTEBOOK = 'copilot.ipynb'; // 사용자 서버 루트 기준 경로
+let COPILOT_NOTEBOOK_NAME = 'copilot.ipynb'; // 파일명(basename)
+let COPILOT_NOTEBOOK_URL = `${JUPYTER_USER_BASE}/api/contents/${COPILOT_NOTEBOOK}`;
 
-// 사용자 식별자(이메일)를 받아 사용자별 폴더·노트북 경로 전역값을 확정한다.
-// 이메일을 파일시스템에 안전한 슬러그로 정규화: 소문자화 → [a-z0-9_.-] 외
-// 문자는 _로 치환 → 40자 컷. 빈 결과면 'user'로 폴백(빈 경로 방지).
-function setCopilotNotebookForUser(username: string | null | undefined): void {
-  const safe =
-    (username || 'user').toLowerCase().replace(/[^a-z0-9_.-]/g, '_').slice(0, 40) || 'user';
-  USER_DIR = `work/${safe}`;
-  COPILOT_NOTEBOOK_NAME = `copilot-${safe}.ipynb`;
-  COPILOT_NOTEBOOK = `${USER_DIR}/${COPILOT_NOTEBOOK_NAME}`;
-  COPILOT_NOTEBOOK_URL = `/jupyter/api/contents/${COPILOT_NOTEBOOK}`;
+// /me의 user_id(=JupyterHub 사용자명)로 사용자별 서버 베이스를 확정한다. 서버 자체가
+// 분리돼 있어 노트북 경로는 루트의 copilot.ipynb로 고정한다 — 예전처럼 파일명에 사용자
+// 슬러그를 넣을 필요가 없다(격리는 서버·볼륨이 보장하므로).
+function setCopilotNotebookForUser(userId: string | null | undefined): void {
+  const id = (userId || '').trim();
+  JUPYTER_USER_BASE = id ? `/jupyter/user/${encodeURIComponent(id)}` : '/jupyter';
+  COPILOT_NOTEBOOK = 'copilot.ipynb';
+  COPILOT_NOTEBOOK_NAME = 'copilot.ipynb';
+  COPILOT_NOTEBOOK_URL = `${JUPYTER_USER_BASE}/api/contents/${COPILOT_NOTEBOOK}`;
 }
 
-// 사용자 작업 폴더를 Jupyter contents API로 만든다(경로 세그먼트마다 멱등하게).
-// 이렇게 해야 /lab/tree/<dir> 열기와 그 안에 copilot 노트북 쓰기가 둘 다
-// 성공한다. `work`는 마운트된 볼륨이라 이미 존재하므로, 보통은 마지막
-// work/<id> 세그먼트만 새로 만든다. GET 404면 없는 것 → PUT으로 디렉터리 생성.
+// 사용자별 서버에서는 루트(/home/jovyan/work)가 이미 개인 공간이고 copilot.ipynb를
+// 루트에 두므로, 따로 만들어 줄 디렉터리가 없다. 호출부 호환을 위해 no-op로 남긴다.
 async function ensureUserDir(): Promise<void> {
-  if (!USER_DIR) return;
-  const parts = USER_DIR.split('/');
-  let prefix = '';
-  // 'work', 'work/<id>' 처럼 누적 경로를 하나씩 검사·생성한다(상위가 없으면
-  // 하위 PUT이 404 나므로 위에서부터 순서대로).
-  for (const part of parts) {
-    prefix = prefix ? `${prefix}/${part}` : part;
-    const head = await fetch(`/jupyter/api/contents/${prefix}?_=${Date.now()}`, {
-      headers: copilotApiHeaders(),
-      credentials: 'omit',
-      cache: 'no-store',
-    });
-    if (head.ok) continue; // 이미 있음 → 다음 세그먼트로
-    if (head.status !== 404) throw new Error(`Jupyter GET dir failed: ${head.status}`);
-    const put = await fetch(`/jupyter/api/contents/${prefix}`, {
-      method: 'PUT',
-      headers: copilotApiHeaders(),
-      credentials: 'omit',
-      body: JSON.stringify({ type: 'directory' }),
-    });
-    if (!put.ok) throw new Error(`Jupyter mkdir failed: ${put.status}`);
-  }
+  return;
 }
 
-// Jupyter contents API용 공통 요청 헤더(아래 모든 copilot.ipynb 호출이 같은
-// 인증·no-cache 방식을 공유). credentials는 'omit'으로 두고 토큰 인증만 쓴다.
+// Jupyter contents API용 공통 요청 헤더(아래 모든 copilot.ipynb 호출이 공유).
+// 인증은 허브 OAuth 쿠키로 한다(공유 토큰 제거) — 호출부는 반드시 credentials:'include'.
 function copilotApiHeaders(): HeadersInit {
   return {
     'Content-Type': 'application/json',
-    Authorization: `token ${JUPYTER_TOKEN}`,
     // 이중 안전장치: 캐시된 GET이 방금(사용자가, 혹은 직전 턴이) 추가한 셀을
     // 못 보고 옛 본문을 재사용하면, 이어지는 PUT이 새 셀을 덮어써 버린다.
     // 그 경합을 막으려고 no-cache를 명시한다.
@@ -816,7 +801,7 @@ async function putCopilotNotebook(content: any): Promise<void> {
   const put = await fetch(COPILOT_NOTEBOOK_URL, {
     method: 'PUT',
     headers: copilotApiHeaders(),
-    credentials: 'omit',
+    credentials: 'include',
     body: JSON.stringify({ type: 'notebook', format: 'json', content }),
   });
   if (!put.ok) {
@@ -836,7 +821,7 @@ async function appendCellToCopilotNotebook(language: 'sql' | 'python', source: s
   // `?_=` 캐시 무력화용 더미 파라미터 — jupyter는 모르는 쿼리 파라미터를 무시한다.
   const head = await fetch(`${url}?_=${Date.now()}`, {
     headers,
-    credentials: 'omit',
+    credentials: 'include',
     cache: 'no-store',
   });
   if (head.ok) {
@@ -1071,13 +1056,12 @@ function getActiveNotebookPanel(): any | null {
 async function ensureCopilotFileExists(): Promise<void> {
   const head = await fetch(`${COPILOT_NOTEBOOK_URL}?_=${Date.now()}`, {
     headers: copilotApiHeaders(),
-    credentials: 'omit',
+    credentials: 'include',
     cache: 'no-store',
   });
   if (head.ok) return;
   if (head.status !== 404) throw new Error(`Jupyter GET failed: ${head.status}`);
-  // 노트북은 work/<id>/ 아래에 있으므로 그 폴더가 먼저 있어야 한다 — 안 그러면
-  // 부모 디렉터리가 없어 PUT이 404 난다.
+  // 노트북은 사용자 서버 루트에 두므로 따로 만들 부모 디렉터리가 없다(ensureUserDir는 no-op).
   await ensureUserDir();
   await putCopilotNotebook(emptyCopilotNotebook().content);
 }
@@ -1209,12 +1193,10 @@ async function fetchNotebookContext(): Promise<{
   const timer = window.setTimeout(() => ctrl.abort(), 4000);
   try {
     const r = await fetch(
-      `/jupyter/api/contents/${COPILOT_NOTEBOOK}?_=${Date.now()}`,
+      `${COPILOT_NOTEBOOK_URL}?_=${Date.now()}`,
       {
-        headers: {
-          Authorization: `token ${JUPYTER_TOKEN}`,
-          'Cache-Control': 'no-cache',
-        },
+        headers: { 'Cache-Control': 'no-cache' },
+        credentials: 'include',
         cache: 'no-store',
         signal: ctrl.signal,
       },

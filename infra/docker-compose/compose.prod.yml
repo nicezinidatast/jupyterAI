@@ -60,31 +60,35 @@ services:
       - --port
       - "8000"
 
-  jupyter:
+  # JupyterHub (DockerSpawner) — 사용자별 격리 컨테이너. base_url=/jupyter/.
+  # docker.sock 마운트 필수: DockerSpawner가 호스트 Docker 데몬으로 노트북 컨테이너를 스폰한다.
+  jupyterhub:
     build:
-      context: ../jupyter
+      context: ../jupyterhub
       dockerfile: Dockerfile
     <<: *restart
-    # Safety cap on the shared box: bounds the Jupyter server + ALL user kernels
-    # so one user's huge dataframe can't OOM-kill the whole stack. Tune to host
-    # RAM (leave ~2-3 GB for backend/portal/SQLite + OS).
-    mem_limit: 4g
-    command:
-      - start-notebook.py
-      - --ServerApp.token=dataplatform
-      - --ServerApp.password=
-      - --ServerApp.allow_origin=*
-      - --ServerApp.disable_check_xsrf=True
-      - --ServerApp.tornado_settings={"headers":{"Content-Security-Policy":"frame-ancestors *"}}
-      - --ServerApp.base_url=/jupyter/
-      - --LabApp.expose_app_in_browser=True
     environment:
-      JUPYTER_ENABLE_LAB: "yes"
-      # No demo DB sources in prod (DB-connection feature removed) → the kernel
-      # startup script skips engine registration cleanly when these are unset.
+      BACKEND_URL: http://backend:8000
+      USER_IMAGE: dataplatform/notebook-user:0.1.0
+      # prod 프로젝트명 dataplatform → 기본 네트워크 dataplatform_default.
+      DOCKER_NETWORK: dataplatform_default
+      JUPYTERHUB_ACTIVE_SERVER_LIMIT: ${JUPYTERHUB_ACTIVE_SERVER_LIMIT:-3}
+      JUPYTERHUB_USER_MEM_LIMIT: ${JUPYTERHUB_USER_MEM_LIMIT:-1.5G}
+      JUPYTERHUB_USER_CPU_LIMIT: ${JUPYTERHUB_USER_CPU_LIMIT:-2.0}
+    depends_on:
+      - backend
     volumes:
-      - jupyter-data:/home/jovyan/work
-      - uploads-data:/home/jovyan/work/uploads
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # jupyter-user-image — `docker compose build` 시 사용자 노트북 이미지를 미리 빌드.
+  # DockerSpawner는 이미지를 이름으로 찾으므로 up 전에 이미지가 존재해야 한다.
+  jupyter-user-image:
+    build:
+      context: ../jupyterhub/user-image
+      dockerfile: Dockerfile
+    image: dataplatform/notebook-user:0.1.0
+    command: ["true"]
+    restart: "no"
 
   portal:
     build:
@@ -93,7 +97,7 @@ services:
     <<: *restart
     depends_on:
       - backend
-      - jupyter
+      - jupyterhub
     # Single public entrypoint. The on-prem (holdings) server only opens one
     # host port to the outside, so default to 5500 — the port that box exposes.
     # Override with PORTAL_PORT=<n> if a different host port is opened.
@@ -102,5 +106,4 @@ services:
 
 volumes:
   redis-data:
-  jupyter-data:
   uploads-data:
