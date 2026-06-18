@@ -57,7 +57,11 @@ c.JupyterHub.active_server_limit = int(os.environ.get("JUPYTERHUB_ACTIVE_SERVER_
 # ~5GB → 동시 3명이면 1인당 1.5GB가 적정(3×1.5=4.5GB). 더 무거운 분석이 필요하면 동시
 # 인원을 줄이고 메모리를 키운다. 한 사용자의 과부하가 다른 사용자에게 번지지 않게 격리한다.
 # mem/cpu/동시인원 모두 환경변수로 조정 가능.
-c.DockerSpawner.mem_limit = os.environ.get("JUPYTERHUB_USER_MEM_LIMIT", "1.5G")
+# 단위 접미사는 대문자(K/M/G/T)여야 한다(JupyterHub ByteSpecification 규칙).
+# 사용자가 "500m"처럼 소문자로 줘도 동작하도록 .upper()로 정규화한다
+# ("500m"→"500M", "1.5g"→"1.5G"). 안 그러면 소문자 접미사는 검증 실패 →
+# "mem_limit ... not the str '500m'" 에러로 스폰이 500이 된다.
+c.DockerSpawner.mem_limit = os.environ.get("JUPYTERHUB_USER_MEM_LIMIT", "1.5G").strip().upper()
 c.DockerSpawner.cpu_limit = float(os.environ.get("JUPYTERHUB_USER_CPU_LIMIT", "2.0"))
 
 # 사용자 컨테이너가 JupyterHub(허브 컨테이너) 및 백엔드와 통신할 수 있도록
