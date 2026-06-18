@@ -327,6 +327,8 @@ services:
     build:
       context: ../jupyterhub
       dockerfile: Dockerfile
+    # 명시 image 태그 — 아래 jupyter-gc 가 같은 이미지를 재사용해 빌드를 1회로 묶는다.
+    image: dataplatform/jupyterhub:0.1.0
     <<: *restart
     environment:
       BACKEND_URL: http://backend:8000
@@ -337,6 +339,9 @@ services:
       JUPYTERHUB_ACTIVE_SERVER_LIMIT: ${JUPYTERHUB_ACTIVE_SERVER_LIMIT:-3}
       JUPYTERHUB_USER_MEM_LIMIT: ${JUPYTERHUB_USER_MEM_LIMIT:-1.5G}
       JUPYTERHUB_USER_CPU_LIMIT: ${JUPYTERHUB_USER_CPU_LIMIT:-2.0}
+      # 노트북 서버 회수 정책: 30분 유휴 + 1일 하드캡(자원 절약).
+      JUPYTERHUB_CULL_TIMEOUT: ${JUPYTERHUB_CULL_TIMEOUT:-1800}
+      JUPYTERHUB_CULL_MAX_AGE: ${JUPYTERHUB_CULL_MAX_AGE:-86400}
     depends_on:
       - backend
     volumes:
@@ -345,6 +350,24 @@ services:
     # 디버그 접근이 필요할 때만 아래 주석을 풀 것.
     # ports:
     #   - "8001:8000"
+
+  # jupyter-gc — 사용자 볼륨 1일 정리 루프(허브 이미지 재사용, 닫힌 망 안전).
+  # idle-culler 가 서버(RAM)를 내리면, 이 루프가 분리되고 1일 지난
+  # jupyterhub-user-* 볼륨(디스크)을 삭제한다. 사용 중 볼륨은 절대 건드리지 않음.
+  jupyter-gc:
+    image: dataplatform/jupyterhub:0.1.0
+    build:
+      context: ../jupyterhub
+      dockerfile: Dockerfile
+    <<: *restart
+    command: ["python", "/srv/jupyterhub/volume_gc.py"]
+    environment:
+      GC_RETENTION_SECONDS: ${JUPYTERHUB_DATA_RETENTION_SECONDS:-86400}
+      GC_INTERVAL_SECONDS: ${JUPYTERHUB_GC_INTERVAL_SECONDS:-3600}
+    depends_on:
+      - jupyterhub
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
   # jupyter-user-image — DockerSpawner가 이름으로 이미지를 찾으므로
   # `docker compose build` 단계에서 미리 빌드해 두기 위한 더미 서비스.

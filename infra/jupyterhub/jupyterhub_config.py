@@ -47,6 +47,14 @@ c.DockerSpawner.image = os.environ.get("USER_IMAGE", "dataplatform/notebook-user
 # 디스크를 소모하는 것을 방지하기 위해서다. 영구 데이터는 볼륨으로 보존된다.
 c.DockerSpawner.remove = True
 
+# 플랫폼에서 로그아웃하면 그 사용자의 노트북 컨테이너도 함께 내린다.
+# 공용 PC 위생: 앞사람이 로그아웃하면 그 사람 서버가 30분(idle-culler)이나
+# 떠서 RAM을 잡고 있지 않도록 즉시 회수한다 — 작은 온프레미스(8GB·동시 3명)
+# 에서 메모리를 빨리 돌려받는 게 중요하다. 파일은 볼륨에 남으므로 다음 로그인
+# 때 그대로 복구된다. (SPA 로그아웃이 /jupyter/hub/logout 도 호출해 허브 쿠키를
+# 지우고, 이 옵션이 그때 컨테이너를 정지시킨다.)
+c.JupyterHub.shutdown_on_logout = True
+
 # 동시 접속(동시에 떠 있는 사용자 노트북 서버) 상한. 작은 온프레미스(~8GB) 서버에선
 # RAM이 곧 한계이므로 "1인당 메모리 × 동시 인원 ≤ 전체 RAM − 시스템 여유분"을 지켜야 한다.
 # 기본 3명으로 시작하고, 서버 사양에 맞춰 JUPYTERHUB_ACTIVE_SERVER_LIMIT로 조정한다(0=무제한).
@@ -85,10 +93,18 @@ c.DockerSpawner.args = [
     "--LabApp.expose_app_in_browser=True",
 ]
 
-# 유휴 노트북 서버를 30분 후 자동 종료하는 idle-culler 서비스를 등록한다.
-# 사용하지 않는 컨테이너가 장시간 메모리와 CPU를 점유하는 것을 막기 위해
-# JupyterHub 공식 보조 서비스 패턴을 활용한다.
+# idle-culler — 두 가지 정책으로 노트북 서버를 자동 회수한다(자원 절약):
+#  1) --timeout(기본 30분): 유휴(아무 활동 없는) 서버를 내려 RAM/CPU를 빨리
+#     돌려받는다. 작은 박스(8GB·동시 3명)에서 메모리가 곧 한계라 짧게 둔다.
+#  2) --max-age(기본 1일): 계속 활동 중이어도 1일이 지나면 서버를 강제로 내린다.
+#     "각 주피터는 하루 지나면 정리"라는 운영 정책을 보장한다. 이렇게 분리한
+#     이유: timeout만으로는 쉬지 않고 켜 둔 서버(파일을 붙들고 있는 볼륨)가
+#     영원히 살아 디스크가 회수되지 않는다. max-age로 1일마다 분리시켜야
+#     volume_gc가 묵은 볼륨을 지울 수 있다(서버가 붙어 있으면 GC가 건너뜀).
 # admin=True 권한이 필요한 이유: culler가 모든 사용자 서버를 직접 종료해야 하기 때문이다.
+# 두 값 모두 환경변수로 조정 가능(끄려면 매우 큰 값으로).
+_cull_timeout = os.environ.get("JUPYTERHUB_CULL_TIMEOUT", "1800")
+_cull_max_age = os.environ.get("JUPYTERHUB_CULL_MAX_AGE", str(24 * 60 * 60))
 c.JupyterHub.services = [
     {
         "name": "idle-culler",
@@ -97,7 +113,8 @@ c.JupyterHub.services = [
             "python",
             "-m",
             "jupyterhub_idle_culler",
-            "--timeout=1800",
+            f"--timeout={_cull_timeout}",
+            f"--max-age={_cull_max_age}",
         ],
     }
 ]

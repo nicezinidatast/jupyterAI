@@ -1803,11 +1803,21 @@ function Shell() {
     );
   }
 
-  // 로그아웃: 백엔드 세션을 지운 뒤, 성공/실패와 무관하게 로그인 페이지로
-  // 보낸다(finally) — 서버 응답이 실패해도 클라이언트는 일단 빠져나가게 한다.
+  // 로그아웃: 백엔드 세션 + JupyterHub 세션을 모두 지운 뒤, 성공/실패와
+  // 무관하게 로그인 페이지로 보낸다(finally) — 서버 응답이 실패해도 클라이언트는
+  // 일단 빠져나가게 한다. 허브 로그아웃(/jupyter/hub/logout)을 함께 호출하는
+  // 이유: dp_session만 지우면 허브 로그인 쿠키와 사용자 노트북 컨테이너가 남아,
+  // 공용 PC에서 앞사람 서버가 RAM을 계속 점유한다(유출은 아님 — 다음 사람이
+  // 토큰으로 재로그인하면 허브가 그 사람으로 전환). 허브 logout은 쿠키를 지우고,
+  // 허브 설정의 shutdown_on_logout=True가 그 사용자 컨테이너를 즉시 회수한다.
+  // 두 호출 모두 best-effort(실패해도 무시) — 어차피 로그인 페이지로 나간다.
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+      await Promise.allSettled([
+        fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }),
+        // 허브 logout은 GET. 리다이렉트 본문은 필요 없으니 결과를 보지 않는다.
+        fetch('/jupyter/hub/logout', { credentials: 'include' }),
+      ]);
     } finally {
       window.location.assign('/login/');
     }
