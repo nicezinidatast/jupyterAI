@@ -7,7 +7,9 @@ from copilot.prompts import build_system_prompt
 
 def test_no_schema() -> None:
     p = build_system_prompt(connection_engine="postgres", schema=None)
-    assert "No schema attached" in p
+    # 스키마(=연결된 DB)가 없으면 프롬프트는 파일 기반 워크플로 안내를 덧붙인다.
+    # 문구는 build_system_prompt의 실제 출력("No database is attached ...")과 일치시킨다.
+    assert "No database is attached" in p
     assert "postgres" in p
 
 
