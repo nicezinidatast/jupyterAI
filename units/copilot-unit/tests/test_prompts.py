@@ -7,10 +7,12 @@ from copilot.prompts import build_system_prompt
 
 def test_no_schema() -> None:
     p = build_system_prompt(connection_engine="postgres", schema=None)
-    # 스키마(=연결된 DB)가 없으면 프롬프트는 파일 기반 워크플로 안내를 덧붙인다.
-    # 문구는 build_system_prompt의 실제 출력("No database is attached ...")과 일치시킨다.
-    assert "No database is attached" in p
-    assert "postgres" in p
+    # 연결된 SQL DB가 없으면(=기본 워크플로) 프롬프트는 파일 기반 안내를 덧붙인다.
+    # 문구는 build_system_prompt의 실제 출력("No SQL database is attached ...")과 일치시킨다.
+    assert "No SQL database is attached" in p
+    # 노트북 코딩 어시스턴트로서 파이썬/판다스를 안내하는지 확인한다.
+    # (DB가 없으면 SQL 엔진명은 일부러 노출하지 않으므로 engine 단언은 두지 않는다.)
+    assert "pandas" in p
 
 
 def test_renders_tables_and_pii_marker() -> None:

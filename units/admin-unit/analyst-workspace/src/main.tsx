@@ -1144,29 +1144,70 @@ function stripCodeFences(text: string): string {
     .trim();
 }
 
-// 활성 노트북의 셀들을 끌어와, 다음 턴에서 모델이 그것을 참조/리팩토링할 수
-// 있게 컨텍스트 프롬프트를 만든다. 우선순위는 라이브 공유 모델(지금 분석가가
-// 보고 있는 미저장 편집까지 포함) → REST copilot.ipynb 폴백 순(fetchNotebookContext).
-function buildNotebookContextPrompt(
-  path: string,
-  codeCells: string[],
-): { prompt: string; cellCount: number } {
-  // 셀이 없으면 빈 프롬프트 — 호출부에서 원 질문만 그대로 보낸다.
-  if (codeCells.length === 0) return { prompt: '', cellCount: 0 };
-  // 셀마다 "--- Cell #n ---" 구분선을 붙여 모델이 셀 경계를 인식하게 한다.
-  const body = codeCells
-    .map((s, i) => `--- Cell #${i + 1} ---\n${s}`)
-    .join('\n\n');
-  const prompt =
-    `현재 활성 노트북(${path})에 들어있는 코드 셀입니다. ` +
-    `사용자의 새 요청이 "이 코드 수정/리팩토링/이어서" 같은 의도면 ` +
-    `이 셀들을 기준으로 답하세요. 새 셀이 필요하면 새 코드 블록을 추가하세요.\n\n` +
-    body;
-  return { prompt, cellCount: codeCells.length };
+// 빈 채팅 화면에 띄우는 예시 프롬프트 — 클릭하면 입력창에 채워진다. 노트북
+// 코딩 어시스턴트의 대표 동작(불러오기·시각화·수정·정리)을 한눈에 보여 줘,
+// 처음 쓰는 사람도 "무엇을 시킬 수 있는지" 바로 감을 잡게 한다.
+const EXAMPLE_PROMPTS = [
+  'uploads 폴더의 CSV를 불러와 요약 통계를 보여줘',
+  '이 데이터프레임을 월별 매출 막대그래프로 그려서 셀에 추가해줘',
+  '방금 셀에서 난 에러를 고쳐줘',
+  '이 코드를 함수로 리팩토링해줘',
+  '결측치를 처리하고 정리하는 셀을 추가해줘',
+];
+
+// 코드 셀의 실행 오류(traceback)를 짧게 추출한다. 라이브 공유 모델 셀과
+// nbformat JSON 셀 모두 outputs 배열을 갖는다. "방금 에러 고쳐줘" 같은 요청에서
+// 모델이 원인을 보고 고칠 수 있도록, 에러가 있으면 그 텍스트를 컨텍스트에 싣는다.
+// ANSI 색코드는 지우고 길이를 제한한다(긴 traceback이 프롬프트를 잠식하지 않게).
+function extractCellError(cell: any): string | undefined {
+  try {
+    const outputs: any[] = cell?.outputs ?? cell?.getOutputs?.() ?? [];
+    for (const o of outputs) {
+      if (o?.output_type === 'error' || o?.ename) {
+        const tb = Array.isArray(o.traceback) ? o.traceback.join('\n') : '';
+        const raw = (tb || `${o.ename ?? 'Error'}: ${o.evalue ?? ''}`)
+          .replace(/\x1b\[[0-9;]*m/g, ''); // ANSI 이스케이프 제거
+        return raw.slice(0, 1500);
+      }
+    }
+  } catch {
+    /* outputs 접근 실패 — 에러 컨텍스트 없이 진행 */
+  }
+  return undefined;
 }
 
-// 활성 노트북의 코드 셀을 모아 컨텍스트 프롬프트를 만든다. 라이브 모델 우선,
-// 실패 시 REST 폴백.
+// 활성 노트북의 셀(과 실행 오류)을 끌어와, 다음 턴에서 모델이 그것을 참조·
+// 수정·리팩토링할 수 있게 컨텍스트 프롬프트를 만든다. 우선순위는 라이브 공유
+// 모델(지금 분석가가 보고 있는 미저장 편집까지 포함) → REST copilot.ipynb 폴백.
+function buildNotebookContextPrompt(
+  path: string,
+  cells: { source: string; error?: string }[],
+): { prompt: string; cellCount: number } {
+  // 셀이 없으면 빈 프롬프트 — 호출부에서 원 질문만 그대로 보낸다.
+  if (cells.length === 0) return { prompt: '', cellCount: 0 };
+  // 셀마다 "--- Cell #n ---" 구분선 + (있으면) 그 셀의 오류를 붙여, 모델이 셀
+  // 경계와 "어디서 에러가 났는지"를 인식하게 한다.
+  let body = cells
+    .map((c, i) => {
+      const head = `--- Cell #${i + 1} ---\n${c.source}`;
+      return c.error ? `${head}\n[이 셀 실행 오류]\n${c.error}` : head;
+    })
+    .join('\n\n');
+  // 백엔드 question 한도(8000자)를 넘겨 422가 나지 않도록 컨텍스트 본문을 상한
+  // 안에서 자른다(사용자 질문 몫을 남겨 둔다). 노트북이 커도 채팅은 막히지 않는다.
+  const MAX_CONTEXT = 6000;
+  if (body.length > MAX_CONTEXT) body = body.slice(0, MAX_CONTEXT) + '\n…(이하 생략)';
+  const prompt =
+    `현재 활성 노트북(${path})의 코드 셀입니다. 사용자의 요청이 ` +
+    `"이 코드 수정/리팩토링/이어서/에러 고쳐" 같은 의도면 이 셀들을 기준으로 ` +
+    `답하고, 오류가 표시된 셀이 있으면 그 원인을 고친 코드를 주세요. ` +
+    `새 셀이 필요하면 새 코드 블록을 추가하세요.\n\n` +
+    body;
+  return { prompt, cellCount: cells.length };
+}
+
+// 활성 노트북의 코드 셀(과 오류)을 모아 컨텍스트 프롬프트를 만든다. 라이브
+// 모델 우선, 실패 시 REST 폴백.
 async function fetchNotebookContext(): Promise<{
   prompt: string;
   cellCount: number;
@@ -1174,15 +1215,15 @@ async function fetchNotebookContext(): Promise<{
   const panel = getActiveNotebookPanel();
   if (panel) {
     try {
-      // 라이브 경로: 분석가가 지금 보고 있는(미저장 편집 포함) 셀을 그대로 읽는다.
+      // 라이브 경로: 분석가가 지금 보고 있는(미저장 편집 포함) 셀 + 실행 오류를 읽는다.
       const shared = panel.content.model.sharedModel;
-      const codeCells: string[] = [];
+      const codeCells: { source: string; error?: string }[] = [];
       for (const c of shared.cells ?? []) {
         if (c?.cell_type !== 'code') continue;
         const s = (
           typeof c.getSource === 'function' ? c.getSource() : String(c.source ?? '')
         ).trim();
-        if (s) codeCells.push(s); // 빈 셀은 제외
+        if (s) codeCells.push({ source: s, error: extractCellError(c) }); // 빈 셀은 제외
       }
       return buildNotebookContextPrompt(panel.context.path as string, codeCells);
     } catch {
@@ -1207,12 +1248,15 @@ async function fetchNotebookContext(): Promise<{
     if (!r.ok) return { prompt: '', cellCount: 0 };
     const nb = await r.json();
     const cells: any[] = nb?.content?.cells ?? [];
-    // nbformat의 source는 문자열 또는 줄 단위 문자열 배열이라 둘 다 처리한다.
+    // nbformat의 source는 문자열 또는 줄 단위 배열이라 둘 다 처리하고, 에러
+    // 출력이 있으면 함께 싣는다.
     const codeCells = cells
       .filter((c) => c.cell_type === 'code')
-      .map((c) => (Array.isArray(c.source) ? c.source.join('') : c.source ?? ''))
-      .map((s: string) => s.trim())
-      .filter((s) => s.length > 0);
+      .map((c) => ({
+        source: (Array.isArray(c.source) ? c.source.join('') : c.source ?? '').trim(),
+        error: extractCellError(c),
+      }))
+      .filter((c) => c.source.length > 0);
     return buildNotebookContextPrompt(COPILOT_NOTEBOOK, codeCells);
   } catch {
     return { prompt: '', cellCount: 0 };
@@ -1298,9 +1342,18 @@ function CopilotPanel({
       // 사용자가 실제로 보고 있는 셀을 함께 싣게 한다. 채팅 UI엔 여전히
       // 원본 질문만 보이고, API 페이로드만 컨텍스트로 증강된다.
       const { prompt: nbPrompt } = await fetchNotebookContext();
-      const augmentedQuestion = nbPrompt
+      let augmentedQuestion = nbPrompt
         ? `${nbPrompt}\n\n---\n\n사용자 요청:\n${question}`
         : question;
+      // 백엔드 question 한도(8000자) 안전 상한. 초과하면 컨텍스트(앞부분)를 먼저
+      // 줄여 사용자 질문은 보존하고, 그래도 길면(질문 자체가 매우 긺) 마지막에 하드 컷.
+      const QLIMIT = 7900;
+      if (augmentedQuestion.length > QLIMIT && nbPrompt) {
+        const tail = `\n\n---\n\n사용자 요청:\n${question}`;
+        const room = Math.max(0, QLIMIT - tail.length);
+        augmentedQuestion = nbPrompt.slice(0, room) + tail;
+      }
+      if (augmentedQuestion.length > QLIMIT) augmentedQuestion = augmentedQuestion.slice(0, QLIMIT);
 
       const res = await fetch('/api/copilot/chat', {
         method: 'POST',
@@ -1422,8 +1475,11 @@ function CopilotPanel({
       gap="sm"
       style={{ height: 'calc(100vh - 88px)', overflow: 'hidden' }}
     >
-      <Group justify="space-between">
-        <Title order={5}>🤖 다분석할Zini</Title>
+      <Group justify="space-between" align="flex-start">
+        <div>
+          <Title order={5}>🤖 다분석할Zini</Title>
+          <Text size="xs" c="dimmed">노트북 분석 코파일럿 · 코드 생성·수정</Text>
+        </div>
         {providerName && <Badge variant="light">{providerName}</Badge>}
       </Group>
 
@@ -1443,11 +1499,29 @@ function CopilotPanel({
         }}
       >
         {history.length === 0 && !pending && (
-          <Text size="sm" c="dimmed" style={{ flexShrink: 0 }}>
-            예: "지난 30일 매출 상위 도시 5개 알려줘" — 커넥션을 고르면 스키마 컨텍스트를 자동 주입합니다.
-            응답에 SQL/Python 코드가 포함되면 현재 활성화된 노트북에 자동으로 셀을 추가합니다
-            (열린 노트북이 없으면 {COPILOT_NOTEBOOK_NAME}).
-          </Text>
+          <Stack gap="xs" style={{ flexShrink: 0 }}>
+            <Text size="sm" c="dimmed">
+              노트북 분석 코파일럿입니다. 파이썬·판다스 코드를 <b>만들고 고치는</b> 걸
+              도와드려요. 자연어로 말하면 코드를 생성해 노트북 셀로 넣고, 각 셀의{' '}
+              <b>✨ 버튼</b>으로는 그 셀을 바로 고칠 수 있어요. 지금 열려 있는 노트북의
+              셀과 <b>실행 에러</b>를 함께 참고하니, "방금 에러 고쳐줘"처럼 이어서 시켜도 됩니다.
+            </Text>
+            <Text size="xs" c="dimmed">이렇게 시켜 보세요 — 누르면 입력창에 채워집니다:</Text>
+            <Group gap="xs" wrap="wrap">
+              {EXAMPLE_PROMPTS.map((ex) => (
+                <Button
+                  key={ex}
+                  size="xs"
+                  variant="light"
+                  color="grape"
+                  style={{ fontWeight: 400 }}
+                  onClick={() => setInput(ex)}
+                >
+                  {ex}
+                </Button>
+              ))}
+            </Group>
+          </Stack>
         )}
 
         {history.map((m, i) => {
@@ -1519,7 +1593,7 @@ function CopilotPanel({
 
       <Group gap={6}>
         <Textarea
-          placeholder="자연어로 질문하세요…"
+          placeholder="코드를 만들거나 고쳐 달라고 하세요 — 예: 'uploads/sales.csv 불러와 월별 매출 그래프 그려줘'"
           value={input}
           onChange={(e) => setInput(e.currentTarget.value)}
           onKeyDown={(e) => {
@@ -1534,7 +1608,9 @@ function CopilotPanel({
           ▶ 보내기
         </Button>
       </Group>
-      <Text size="xs" c="dimmed">⌘/Ctrl + Enter 로 전송 — 응답은 스트리밍됩니다.</Text>
+      <Text size="xs" c="dimmed">
+        ⌘/Ctrl + Enter 전송 · 코드는 <b>📥 셀에 삽입</b>으로 노트북에 넣고, 노트북 셀의 <b>✨</b>로 그 셀을 고칩니다.
+      </Text>
     </Stack>
   );
 }
