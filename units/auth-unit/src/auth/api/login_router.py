@@ -131,6 +131,24 @@ def _user_payload(user: User, roles: list[str]) -> dict[str, object]:
     }
 
 
+def _session_token(request: Request) -> str | None:
+    """요청에서 세션 토큰을 꺼낸다 — ``dp_session`` 쿠키 우선, 없으면
+    ``Authorization: Bearer <session_id>`` 헤더를 허용한다.
+
+    Bearer를 허용하는 이유: JupyterHub의 PlatformAuthenticator가 브라우저 쿠키 없이
+    서버-서버로 ``Authorization: Bearer <token>``을 붙여 ``/api/auth/me``를 호출해
+    사용자를 검증하기 때문이다. 토큰 값은 세션 id 그대로이며, 동일 신뢰 도메인(포털과
+    같은 오리진·내부망) 안에서만 오간다.
+    """
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if cookie:
+        return cookie
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[len("Bearer "):].strip() or None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -224,8 +242,9 @@ async def me(db: Session, request: Request) -> dict[str, object]:
     """활성 사용자의 프로필을 반환하고, 쿠키가 해석되지 않으면 401.
 
     SPA가 새로고침 후 현재 로그인 상태와 역할을 다시 채우는 데 쓰는 엔드포인트다.
+    JupyterHub 인증자도 Bearer 토큰으로 이 엔드포인트를 호출해 사용자를 확인한다.
     """
-    cookie_value = request.cookies.get(SESSION_COOKIE)
+    cookie_value = _session_token(request)
     resolved = await resolve_session(db, cookie_value)
     if resolved is None:
         raise HTTPException(status_code=401, detail="unauthenticated")
@@ -241,12 +260,33 @@ async def check(db: Session, request: Request) -> dict[str, object]:
     프로필 본문이 필요 없는 곳(예: 라우팅 가드)에서 인증 여부만 빠르게 확인하기
     위한 용도라 ``/me``보다 응답을 최소화한다.
     """
-    cookie_value = request.cookies.get(SESSION_COOKIE)
+    cookie_value = _session_token(request)
     resolved = await resolve_session(db, cookie_value)
     if resolved is None:
         raise HTTPException(status_code=401, detail="unauthenticated")
     await db.commit()
     return {}
+
+
+@router.get("/jupyter-token")
+async def jupyter_token(db: Session, request: Request) -> dict[str, str]:
+    """로그인된 사용자가 JupyterHub에 로그인할 때 쓸 단기 토큰을 돌려준다.
+
+    SPA는 이 값을 JupyterHub 로그인의 ``platform_token``으로 넘기고, 허브의
+    PlatformAuthenticator는 그 토큰을 Bearer로 ``/api/auth/me``에 검증해 사용자를
+    확정한다(쿠키→사용자별 주피터 서버로 이어지는 다리).
+
+    현재 토큰은 세션 id를 그대로 쓴다. ``dp_session``은 httpOnly라 JS가 직접 읽지
+    못하므로, 같은 세션을 식별하는 이 값을 본문으로 한 번 내려 주는 것이다. 동일
+    오리진(포털)·내부망 안에서만 쓰이며, 세션이 폐기되면 이 토큰도 즉시 무효가 된다.
+    """
+    token = _session_token(request)
+    resolved = await resolve_session(db, token)
+    if resolved is None:
+        raise HTTPException(status_code=401, detail="unauthenticated")
+    await db.commit()
+    assert token is not None  # resolve_session이 통과했으므로 토큰은 존재한다
+    return {"token": token}
 
 
 @router.post("/change-password")
