@@ -70,10 +70,10 @@ async def _run() -> None:
         def client() -> httpx.AsyncClient:
             return httpx.AsyncClient(transport=transport, base_url="http://t")
 
-        # 1) admin(admin / admin_st) 로그인 → /me 에서 Admin 역할 확인 → 로그아웃 후 401
+        # 1) admin(admin / admin) 로그인 → /me 에서 Admin 역할 확인 → 로그아웃 후 401
         async with client() as c:
             r = await c.post(
-                "/api/auth/login", json={"username": "admin", "password": "admin_st"}
+                "/api/auth/login", json={"username": "admin", "password": "admin"}
             )
             assert r.status_code == 200, (r.status_code, r.text)
             assert r.cookies.get("dp_session"), "login must set dp_session cookie"
