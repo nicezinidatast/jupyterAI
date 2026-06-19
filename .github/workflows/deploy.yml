@@ -1,0 +1,59 @@
+# main 에 머지(push)되면 서버의 self-hosted 러너가 자동 배포하고,
+# Slack 으로 "배포 시작 / 완료 / 실패" 를 알린다.
+#
+# 동작 원리:
+#   배포 대상(prod 서버)은 사설 IP·폐쇄망이라 GitHub 클라우드 러너가 닿을 수
+#   없지만, 서버가 github.com·hooks.slack.com 으로는 아웃바운드가 된다(확인:
+#   git ls-remote / curl hooks.slack.com 모두 OK). 그래서 서버에 등록한
+#   self-hosted 러너가 GitHub 에서 작업을 받아 "로컬에서" 배포한다.
+#   실제 배포 로직은 scripts/deploy.sh 한 곳에 있어 CI 든 수동이든 동일하게 돈다
+#   (배포 시작/완료/실패 Slack 알림도 그 스크립트가 보낸다).
+#
+# ── 사전 준비(1회) ────────────────────────────────────────────────────────
+#  1) self-hosted 러너 등록(서버에서):
+#     저장소 → Settings → Actions → Runners → New self-hosted runner →
+#     안내되는 ./config.sh (Windows 는 config.cmd) 실행, 라벨 기본값 사용.
+#     ※ Windows + WSL 서버면 러너를 "WSL 안"에 설치하면(리눅스 러너) docker·bash
+#       가 그대로 동작해 가장 깔끔하다(아래 bash/도커 호출이 그대로 먹는다).
+#     서비스로 등록(리눅스: sudo ./svc.sh install && sudo ./svc.sh start)하면
+#     재부팅 후에도 자동 기동된다.
+#  2) repo Variable  DEPLOY_DIR = 서버의 저장소 클론 절대경로(.env 가 있는 곳).
+#     Settings → Secrets and variables → Actions → "Variables" 탭 → New variable.
+#  3) repo Secret    SLACK_WEBHOOK_URL = Slack Incoming Webhook URL.
+#     같은 화면 "Secrets" 탭. 없으면 배포는 되고 Slack 알림만 생략된다.
+# ──────────────────────────────────────────────────────────────────────────
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  # 수동 배포(롤백 후 재배포 등) — Actions 탭의 "Run workflow".
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false   # 진행 중 배포는 취소하지 않는다(중간 상태 방지).
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    # 서버에 등록한 self-hosted 러너에서 실행한다.
+    runs-on: [self-hosted]
+    # 서버의 "기존 클론"(.env 가 갖춰진 곳)에서 배포한다 — 러너 _work 의 빈
+    # 체크아웃이 아니라 그 디렉터리여야 하므로, actions/checkout 을 쓰지 않고
+    # working-directory 로 그 경로를 가리킨다. deploy.sh 가 git reset 으로
+    # 최신 main 을 받아 빌드한다.
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ vars.DEPLOY_DIR || '/opt/0521_platform' }}
+    steps:
+      - name: 배포 (scripts/deploy.sh — 시작/완료/실패 Slack 알림 포함)
+        env:
+          # deploy.sh 가 이 웹훅으로 배포 시작/완료/실패를 Slack 에 POST 한다.
+          # (비어 있으면 deploy.sh 가 알림을 조용히 건너뛴다.)
+          DEPLOY_NOTIFY_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: bash scripts/deploy.sh

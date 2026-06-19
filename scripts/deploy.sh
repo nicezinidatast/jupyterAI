@@ -25,6 +25,8 @@ cd "$(dirname "$0")/.."
 
 COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose/compose.prod.yml}"
 DOCKER="${DOCKER:-docker}"
+# 알림에 붙일 프로젝트 라벨 — CI(러너)면 GITHUB_REPOSITORY, 수동이면 현재 폴더명.
+PROJECT="${GITHUB_REPOSITORY:-$(basename "$(pwd)")}"
 
 # 콘솔 + (설정됐으면) 내부 알림 웹훅으로 한 줄 메시지를 보낸다.
 # 메시지에 따옴표를 넣지 않으므로 JSON 조립은 단순 치환으로 충분하다.
@@ -38,11 +40,11 @@ notify() {
 }
 
 # 어느 단계에서 실패하든(=set -e 로 중단) "배포 실패"를 먼저 알리고 종료한다.
-on_err() { notify "❌ 배포 실패 — 로그 확인 필요"; }
+on_err() { notify "❌ 배포 실패 — ${PROJECT} (로그 확인 필요)"; }
 trap on_err ERR
 
 REV="$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
-notify "🚀 배포 시작 — ${REV}"
+notify "🚀 배포 시작 — ${PROJECT} (${REV})"
 
 # 내부 git 미러(또는 외부 origin)에 닿으면 최신 main 으로 동기화한다.
 # 완전 망분리라 origin 에 못 닿으면(=오프라인으로 코드를 반입한 경우) 이 단계는
@@ -68,4 +70,4 @@ $DOCKER compose -f "${COMPOSE_FILE}" ps
 # 빌드로 생긴 dangling 이미지 정리(디스크 회수). 실패해도 배포 성공엔 영향 없음.
 $DOCKER image prune -f || true
 
-notify "✅ 배포 완료 — ${REV}"
+notify "✅ 배포 완료 — ${PROJECT} (${REV})"
