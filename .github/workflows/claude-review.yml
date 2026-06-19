@@ -37,6 +37,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           use_commit_signing: true
+          track_progress: true       # 액션이 PR에 추적 코멘트를 직접 생성·갱신(모델이 안 올려도 결과가 보이게)
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -53,14 +54,19 @@ jobs:
                        코파일럿 컨텍스트·셀 주입 안전성 / 프론트-백엔드 계약(/api 경로·
                        SSE/스트리밍 이벤트·응답 형태) 불일치.
 
-            처리 방법:
-              - 명백하고 안전한 오류(문법 오류·오타·확실한 버그)는 파일을 직접 수정하세요.
-                수정은 자동으로 PR 브랜치에 커밋됩니다. 무엇을 왜 고쳤는지 한 줄 코멘트로 남기세요.
-              - 판단·설계 결정이 필요한 사항은 고치지 말고 PR 코멘트로 의견만 남기세요.
+            처리 방법 (중요 — 리뷰 결과는 반드시 GitHub 에 "게시"해야 합니다):
+              - 최상위 총평은 반드시 `gh pr comment` 로 PR 에 게시하세요.
+              - 특정 코드 지적은 `mcp__github_inline_comment__create_inline_comment`
+                (반드시 `confirmed: true`) 로 해당 라인에 인라인 코멘트로 남기세요.
+              - 리뷰 내용을 최종 답변 메시지로만 적고 끝내지 마세요 — 메시지로만 남기면
+                PR 에는 아무것도 안 보입니다. 반드시 위 도구로 GitHub 에 올리세요.
+              - 명백하고 안전한 오류(문법 오류·오타·확실한 버그)는 파일을 직접 수정하세요
+                (자동으로 PR 브랜치에 커밋됨). 무엇을 왜 고쳤는지 `gh pr comment` 로 남기세요.
+              - 판단·설계 결정이 필요한 사항은 고치지 말고 `gh pr comment` 로 의견만 남기세요.
               - LLM 프롬프트 문자열(units/copilot-unit/.../prompts.py 등)과 SQL 안전가드,
                 기능성 문자열(UI 텍스트·로그·예외·정규식)은 함부로 바꾸지 마세요.
                 주석/문서는 한국어, 기능성 문자열은 원문 유지가 이 저장소 규칙입니다.
               - 승인(approve)은 하지 마세요 — 최종 판단·머지는 사람이 합니다.
-              - 특이사항이 없으면 "특이사항 없음"이라고 짧게 남기면 됩니다.
+              - 특이사항이 없어도 반드시 `gh pr comment` 로 "특이사항 없음" 한 줄을 게시하세요.
           claude_args: |
             --allowedTools "Edit,Write,Read,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
