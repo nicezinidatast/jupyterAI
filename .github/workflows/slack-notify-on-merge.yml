@@ -1,5 +1,5 @@
-# main 브랜치에 머지(=push)되면 Slack 채널로 알림을 보낸다.
-# PR 머지든 직접 push든, main 에 커밋이 들어오면 정확히 한 번 알림이 간다.
+# main 으로 향하는 PR 이 "머지"될 때만 Slack 채널로 알림을 보낸다.
+# (그냥 닫기만 하고 머지 안 한 PR 은 알림 없음 — 아래 job 의 if 로 거른다.)
 #
 # ──────────────────────────────────────────────────────────────────────────
 # 설정(딱 한 가지만 직접 하면 된다 — 나머지는 이 파일이 처리):
@@ -10,17 +10,20 @@
 #      저장소 → Settings → Secrets and variables → Actions → New repository secret
 #      Name:  SLACK_WEBHOOK_URL
 #      Value: 복사한 Webhook URL
-#   끝. 다음 머지부터 알림이 온다. (시크릿이 없으면 워크플로는 조용히 통과한다.)
+#   끝. 다음 PR 머지부터 알림이 온다. (시크릿이 없으면 워크플로는 조용히 통과한다.)
 #
-# 활성화 시점: 이 파일이 main 에 올라간 뒤부터 동작한다(이 브랜치를 머지하는
-# 그 푸시부터 바로 켜진다). 수동 테스트는 main 에 올라간 뒤 Actions 탭의
-# "Run workflow"(workflow_dispatch)로 할 수 있다.
+# 활성화 시점(중요): pull_request 트리거는 GitHub 가 *기본 브랜치(main)에 있는*
+# 워크플로 파일을 읽어 실행한다. 따라서 이 파일이 main 에 올라간 "다음" PR
+# 머지부터 동작한다 — 이 브랜치를 머지하는 것 자체로는 알림이 오지 않는다.
+# 동작 확인은 main 에 올라간 뒤 Actions 탭의 "Run workflow"(수동 실행)로 한다.
 # ──────────────────────────────────────────────────────────────────────────
 
-name: Slack notify on merge
+name: Slack notify on PR merge
 
 on:
-  push:
+  pull_request:
+    # closed = 머지 또는 그냥 닫힘. branches=main → main 으로 향하는 PR 만 대상.
+    types: [closed]
     branches: [main]
   # 수동 실행 — 알림이 정상인지 Actions 탭에서 바로 테스트할 수 있다.
   workflow_dispatch:
@@ -32,6 +35,8 @@ permissions:
 jobs:
   notify:
     runs-on: ubuntu-latest
+    # 실제 "머지된" PR 일 때만(단순 닫힘 제외), 그리고 수동 실행 테스트일 때만 돈다.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true }}
     steps:
       - name: Send Slack notification
         env:
@@ -47,45 +52,57 @@ jobs:
             exit 0
           fi
 
-          # 이벤트 페이로드에서 사람이 읽을 정보를 뽑는다. workflow_dispatch(수동)
-          # 실행에는 head_commit/compare 가 없으므로 모두 폴백을 둔다.
+          # PR 이벤트 페이로드에서 사람이 읽을 정보를 뽑는다. workflow_dispatch(수동)
+          # 실행에는 pull_request 객체가 없으므로 모두 폴백을 둔다.
           EV="${GITHUB_EVENT_PATH}"
-          # 첫 줄만 jq 안에서 뽑는다(| head 파이프 제거 — pipefail+SIGPIPE 풋건 회피).
-          COMMIT_MSG=$(jq -r '(.head_commit.message // "수동 실행(테스트 알림)") | split("\n")[0]' "$EV")
-          COMMIT_URL=$(jq -r '.head_commit.url // ""' "$EV")
-          COMPARE_URL=$(jq -r '.compare // ""' "$EV")
-          PUSHER=$(jq -r '.pusher.name // .sender.login // "unknown"' "$EV")
-          COMMIT_COUNT=$(jq -r '(.commits | length) // 0' "$EV")
+          PR_NUM=$(jq -r '.pull_request.number // ""' "$EV")
+          # 제목 첫 줄만(여러 줄 제목 방지). 수동 실행이면 테스트 문구로 폴백.
+          PR_TITLE=$(jq -r '(.pull_request.title // "수동 실행(테스트 알림)") | split("\n")[0]' "$EV")
+          PR_URL=$(jq -r '.pull_request.html_url // ""' "$EV")
+          PR_URL="${PR_URL:-https://github.com/${GITHUB_REPOSITORY}}"
+          PR_AUTHOR=$(jq -r '.pull_request.user.login // "unknown"' "$EV")
+          MERGED_BY=$(jq -r '.pull_request.merged_by.login // .sender.login // "unknown"' "$EV")
+          BASE_REF=$(jq -r '.pull_request.base.ref // "main"' "$EV")
+          HEAD_REF=$(jq -r '.pull_request.head.ref // "-"' "$EV")
+          PR_COMMITS=$(jq -r '.pull_request.commits // 0' "$EV")
 
-          # 버튼 링크: 비교(diff) URL 우선, 없으면 커밋 URL, 그것도 없으면 저장소 홈.
-          LINK_URL="${COMPARE_URL:-$COMMIT_URL}"
-          LINK_URL="${LINK_URL:-https://github.com/${GITHUB_REPOSITORY}}"
+          # 헤더에 쓸 "#번호" — 수동 실행이면 번호가 없으니 비워 둔다.
+          PR_TAG=""
+          [ -n "${PR_NUM}" ] && PR_TAG="#${PR_NUM} "
 
-          # jq 로 페이로드를 만든다 — 커밋 메시지의 따옴표/특수문자가 그대로
-          # 안전하게 escape 되어 JSON 이 깨지지 않는다(직접 문자열 조립 금지).
+          # jq 로 페이로드를 만든다 — PR 제목의 따옴표/특수문자가 그대로 안전하게
+          # escape 되어 JSON 이 깨지지 않는다(직접 문자열 조립 금지).
           PAYLOAD=$(jq -n \
-            --arg repo   "${GITHUB_REPOSITORY}" \
-            --arg branch "${GITHUB_REF_NAME}" \
-            --arg pusher "${PUSHER}" \
-            --arg msg    "${COMMIT_MSG}" \
-            --arg count  "${COMMIT_COUNT}" \
-            --arg url    "${LINK_URL}" \
-            '{
-              text: "✅ \($repo) `\($branch)` 머지: \($msg)",
+            --arg repo    "${GITHUB_REPOSITORY}" \
+            --arg tag     "${PR_TAG}" \
+            --arg title   "${PR_TITLE}" \
+            --arg url     "${PR_URL}" \
+            --arg author  "${PR_AUTHOR}" \
+            --arg merger  "${MERGED_BY}" \
+            --arg base    "${BASE_REF}" \
+            --arg head    "${HEAD_REF}" \
+            --arg commits "${PR_COMMITS}" \
+            '
+            # Slack mrkdwn 안전: 자유 입력인 PR 제목의 & < > 를 먼저 이스케이프해야
+            # <url|라벨> 링크 문법이 깨지지 않는다(& 를 가장 먼저 치환).
+            (($title | gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;"))) as $st
+            | {
+              text: "✅ \($repo): PR \($tag)머지됨 — \($st)",
               blocks: [
                 { type: "header",
-                  text: { type: "plain_text", text: "✅ 머지 알림", emoji: true } },
+                  text: { type: "plain_text", text: "✅ PR 머지 알림", emoji: true } },
+                { type: "section",
+                  text: { type: "mrkdwn", text: "*<\($url)|PR \($tag)\($st)>*" } },
                 { type: "section", fields: [
                     { type: "mrkdwn", text: "*저장소:*\n\($repo)" },
-                    { type: "mrkdwn", text: "*브랜치:*\n\($branch)" },
-                    { type: "mrkdwn", text: "*머지한 사람:*\n\($pusher)" },
-                    { type: "mrkdwn", text: "*커밋 수:*\n\($count)" }
+                    { type: "mrkdwn", text: "*브랜치:*\n\($head) → \($base)" },
+                    { type: "mrkdwn", text: "*작성자:*\n\($author)" },
+                    { type: "mrkdwn", text: "*머지한 사람:*\n\($merger)" },
+                    { type: "mrkdwn", text: "*커밋 수:*\n\($commits)" }
                 ] },
-                { type: "section",
-                  text: { type: "mrkdwn", text: "*최근 변경:*\n\($msg)" } },
                 { type: "actions", elements: [
                     { type: "button",
-                      text: { type: "plain_text", text: "GitHub에서 보기", emoji: true },
+                      text: { type: "plain_text", text: "PR 보기", emoji: true },
                       url: $url }
                 ] }
               ]
