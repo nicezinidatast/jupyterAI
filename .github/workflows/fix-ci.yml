@@ -1,0 +1,58 @@
+# CI 워크플로가 PR 에서 실패하면, 실패 로그를 Claude 에 넘겨 코드를 고쳐 PR 브랜치에 커밋한다.
+#
+# ※ 한계 1: 자동수정 커밋은 GITHUB_TOKEN(use_commit_signing)으로 올라가 CI 를 '자동 재실행'
+#   시키지 못한다. 수정 후 통과 여부는 그 브랜치에 한 번 더 push 하거나 'Re-run' 하면 확인.
+# ※ 한계 2: workflow_run 트리거는 이 파일이 main(기본 브랜치)에 있어야 동작한다(브랜치에선 안 돎).
+#
+# ── 필요한 GitHub Secret ──
+#   CLAUDE_CODE_OAUTH_TOKEN (claude-review.yml 과 동일)
+name: Fix failing CI
+
+on:
+  workflow_run:
+    workflows: ["CI"]          # ci.yml 의 name 과 정확히 일치해야 함
+    types: [completed]
+
+permissions:
+  contents: write              # PR 브랜치에 수정 커밋
+  pull-requests: write         # PR 코멘트
+  actions: read                # 실패 로그 읽기(gh run view --log-failed)
+
+jobs:
+  fix:
+    name: CI 실패 자동 수정
+    # CI 가 'PR 에서' 실패했을 때만 동작
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}   # 실패한 PR 브랜치
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          use_commit_signing: true
+          prompt: |
+            CI 워크플로 "${{ github.event.workflow_run.name }}" (run id ${{ github.event.workflow_run.id }})가
+            브랜치 "${{ github.event.workflow_run.head_branch }}" 에서 실패했습니다.
+            이 저장소는 데이터 분석 플랫폼 모노레포입니다 — 백엔드 Python(units/*·backend, uv
+            workspace, ruff), 프론트 TypeScript/React+Vite SPA(units/admin-unit/* — 각 SPA
+            는 npm run build = vite build). (pytest 는 CI 미편입.)
+
+            현재 CI 게이트는 프론트 SPA 빌드(강제)이고 backend ruff 는 advisory 입니다 —
+            따라서 실패는 대개 어느 SPA 의 빌드(타입·import·구문) 오류입니다.
+
+            1) `gh run view ${{ github.event.workflow_run.id }} --log-failed` 로 실패 로그를 확인하세요.
+            2) 원인을 코드에서 찾아 수정하세요. 프론트 빌드 실패는 해당 SPA(units/admin-unit/<spa>)
+               의 .ts/.tsx 를, ruff 관련이면 `uvx ruff check --fix .` / `uvx ruff format .` 으로.
+               수정 파일은 자동으로 이 브랜치에 커밋됩니다.
+            3) 무엇을 왜 고쳤는지 PR 에 코멘트로 한 줄 남기세요. (PR 번호는
+               `gh pr list --head "${{ github.event.workflow_run.head_branch }}"` 로 확인)
+            LLM 프롬프트 문자열·SQL 안전가드·기능성 문자열은 함부로 바꾸지 마세요. 확실히 고칠 수
+            없으면(환경/비밀값 요구 등) 커밋하지 말고 원인·제안만 코멘트로 남기세요.
+          claude_args: |
+            --allowedTools "Edit,Write,Read,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash(gh run view:*),Bash(gh pr list:*),Bash(gh pr comment:*)"

@@ -1,0 +1,53 @@
+# PR 의 백엔드(Python)·프론트(TypeScript SPA)가 정상인지 검사하는 CI.
+# 실패하면 fix-ci.yml 이 실패 로그를 Claude 에 넘겨 자동 수정을 시도한다.
+#
+#   backend  : ruff check + format --check  (현재 코드가 아직 ruff-clean 이 아니라 advisory.
+#              정리 후 강제 게이트로 승격 — 아래 주석 참고)
+#   frontend : 각 SPA 를 npm install → npm run build (vite build) — 강제 게이트
+#
+# ※ name 은 "CI" — fix-ci.yml 의 workflows: ["CI"] 와 정확히 일치해야 자동수정이 트리거된다.
+# ※ pytest 는 CI 미편입 — 일부 테스트가 외부 의존(Anthropic 라운드트립=copilot 마커,
+#    keycloak=oidc 마커, DB 드라이버)을 요구해 무겁고 불안정. 실질 검증은 컨테이너에서.
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  backend:
+    name: 백엔드 (Python) 린트 (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      # 코드베이스가 아직 ruff-clean 이 아니라(포맷·import 정리 필요) 우선 advisory 로
+      # 둬서 CI 가 첫날부터 빨개지지 않게 한다. 정리:
+      #   uv run ruff format .  &&  uvx ruff check --fix .
+      # 후 아래 두 step 의 continue-on-error 를 false 로 바꾸면 강제 게이트가 된다.
+      - name: Lint (ruff — advisory)
+        run: uvx ruff check .
+        continue-on-error: true
+      - name: Format check (ruff format — advisory)
+        run: uvx ruff format --check .
+        continue-on-error: true
+
+  frontend:
+    name: 프론트 빌드 (${{ matrix.spa }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false          # 한 SPA 가 깨져도 나머지 결과를 모두 본다
+      matrix:
+        spa: [admin-console, auditor-console, analyst-workspace, platform-login]
+    defaults:
+      run:
+        working-directory: units/admin-unit/${{ matrix.spa }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"     # 각 SPA Dockerfile 의 node 버전과 맞춤
+      - name: 설치 + 빌드 (vite build)
+        run: |
+          npm install
+          npm run build

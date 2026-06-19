@@ -1,0 +1,45 @@
+# main 외 브랜치에 push 하면 main 으로 향하는 PR 을 자동으로 연다(이미 열려 있으면 생략).
+#
+# ※ PR 을 'PAT'(개인 액세스 토큰)로 생성하는 이유:
+#   GitHub 규칙상 기본 GITHUB_TOKEN 으로 만든 PR 의 'opened' 이벤트는 다른 워크플로
+#   (Claude 검토·CI)를 트리거하지 못한다. 사용자 PAT 로 만들면 정상 트리거된다.
+#   → push 한 번으로  PR 자동 생성 → 자동 검토 → 자동 CI  가 모두 돈다.
+#
+# ── 필요한 GitHub Secret ──
+#   PAT_FOR_PR : fine-grained PAT (이 저장소만). 권한 = Pull requests: Read/Write + Contents: Read.
+#                repo Settings → Secrets and variables → Actions 에 등록.
+name: Auto PR
+
+on:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-pr-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  open-pr:
+    name: 브랜치 push → PR 자동 생성
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 열린 PR 없으면 생성
+        env:
+          GH_TOKEN: ${{ secrets.PAT_FOR_PR }}       # PAT 로 인증 → 이 PR 이 검토/CI 를 트리거
+        run: |
+          branch="${GITHUB_REF_NAME}"
+          num=$(gh pr list --head "$branch" --base main --state open --json number --jq '.[0].number')
+          if [ -n "$num" ]; then
+            echo "이미 PR #$num 가 열려 있음 — 생성 생략 (이후 push 는 synchronize 로 재검토)"
+            exit 0
+          fi
+          # PR 제목: 브랜치명 대신 최신 커밋 제목(한 줄)을 사용 — 훨씬 읽기 쉽다. 비면 브랜치명으로 폴백.
+          title=$(git log -1 --pretty=%s)
+          [ -z "$title" ] && title="$branch"
+          gh pr create --base main --head "$branch" \
+            --title "$title" \
+            --body "자동 생성된 PR입니다 (브랜치 \`$branch\`). Claude 검토 코멘트와 CI 결과를 확인하고, 문제 없으면 승인 후 머지하세요. 머지되면 self-hosted 러너로 prod 자동 배포됩니다(배포 시작/완료 Slack 알림)."
