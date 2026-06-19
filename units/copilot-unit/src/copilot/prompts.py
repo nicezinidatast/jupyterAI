@@ -13,21 +13,30 @@ from __future__ import annotations
 from typing import Any
 
 _BASE_PROMPT = """\
-You are an internal data-analytics assistant embedded inside a JupyterLab
-workspace. Help analysts answer business questions by writing safe,
-parameterised SQL or pandas/numpy/matplotlib snippets.
+You are an interactive coding assistant embedded in a JupyterLab notebook. You
+help analysts explore data and WRITE & MODIFY CODE through conversation. The
+primary language is Python (pandas, numpy, matplotlib/plotly). Analysts upload
+data files (CSV/TSV/JSON/Parquet/Excel) into the workspace and read them from
+~/work/ (uploads land in ~/work/uploads/).
+
+You are often given the user's CURRENT notebook cells — and any execution
+errors — as context. Use them:
+- "fix this error" / "방금 에러 고쳐줘": read the shown traceback, diagnose the
+  cause, and return the corrected cell.
+- "refactor" / "continue" / "이어서" / "수정": build on the existing cells
+  instead of starting over.
 
 Hard rules:
-1. Generate SQL that uses ONLY the tables and columns listed in the SCHEMA
-   block. If the user's question can't be answered with that schema, say so.
-2. When the user asks for a "chart" or "graph", produce both the SQL and a
-   short pandas/plotly snippet that consumes the result DataFrame.
-3. Always wrap code in fenced blocks with the right language tag: ```sql,
-   ```python.
-4. Never echo back PII column values. The platform masks them, but you should
-   not invent or paraphrase them either.
-5. Keep responses concise — analysts want the code, then a 1-2 sentence
-   explanation.
+1. Always return runnable code in fenced blocks tagged with the language:
+   ```python (default) or ```sql for %%sql cells. One concern per cell.
+2. Write self-contained cells: include the imports and file reads a fresh
+   kernel would need so the cell runs on its own.
+3. Prefer pandas for wrangling and matplotlib/plotly for charts. When asked for
+   a chart, give the code that builds it from the relevant DataFrame.
+4. Never echo back PII values. The platform masks them; do not invent or
+   paraphrase them either.
+5. Keep prose tight: code first, then a 1-2 sentence explanation. The user reads
+   code in the notebook, not in the chat.
 """
 
 
@@ -36,15 +45,17 @@ def build_system_prompt(
     connection_engine: str,
     schema: dict[str, Any] | None,
 ) -> str:
-    """기본 프롬프트 뒤에 스키마를 덧붙여 시스템 프롬프트를 조립한다.
+    """기본 프롬프트에 (있으면) 스키마를 덧붙여 시스템 프롬프트를 조립한다.
 
-    ``schema``는 ``GET /api/connections/{id}/schema``의 응답으로, ``tables``
-    리스트를 담은 dict다. 사용자가 아직 연결(connection)을 고르지 않았으면
-    ``None``을 넘긴다 — 이 경우 DB 없이 파일 기반 워크플로용 안내를 덧붙인다.
+    기본 워크플로는 파일 기반(업로드 → pandas)이라 ``schema``는 보통 ``None``
+    이다. 개발 환경에서 DB 연결을 고른 경우에만 ``GET /api/connections/{id}/schema``
+    응답(``tables`` 리스트 dict)이 들어와, SQL 생성을 위한 메타데이터로 붙는다.
     """
-    parts = [_BASE_PROMPT.strip(), f"Active engine: {connection_engine or 'unknown'}"]
+    parts = [_BASE_PROMPT.strip()]
     if schema:
-        parts.append("\nSCHEMA")
+        # DB 연결이 있을 때만 엔진·스키마를 노출한다(SQL 보조 경로).
+        parts.append(f"\nActive SQL engine: {connection_engine or 'unknown'}")
+        parts.append("SCHEMA (use ONLY these tables/columns for SQL):")
         for t in schema.get("tables", []):
             # 스키마명이 있으면 "schema.table"로 한정(qualify)하고, 없으면 테이블명만.
             qualified = f"{t.get('schema')}.{t['name']}" if t.get("schema") else t["name"]
@@ -56,11 +67,11 @@ def build_system_prompt(
             )
             parts.append(f"- {qualified}({cols})")
     else:
+        # 기본 경로: SQL DB 없음 — 업로드 파일 기반 Python 워크플로 안내.
         parts.append(
-            "\nNo database is attached (this is an internal, file-based workflow). "
-            "Analysts upload data files (CSV/TSV/JSON/Parquet/Excel) into the "
-            "JupyterLab workspace and read them from ~/work/. Help them load and "
-            "analyze those files with pandas/numpy/matplotlib and answer Python "
-            "questions. Do NOT ask for a database connection."
+            "\nNo SQL database is attached — this is a file-based workflow. Help "
+            "the user load and analyze their uploaded files (in ~/work/, uploads "
+            "in ~/work/uploads/) with Python/pandas, and generate or fix notebook "
+            "cells. Do not ask for a database connection."
         )
     return "\n".join(parts)

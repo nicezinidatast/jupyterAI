@@ -2,7 +2,7 @@
 
 이 모듈에는 성격이 다른 두 가지 관심사가 공존한다:
 
-* :func:`bootstrap_admin` — **항상** 시작 시 실행된다. ``admin`` / ``admin_st`` 계정이
+* :func:`bootstrap_admin` — **항상** 시작 시 실행된다. ``admin`` / ``admin`` 계정이
   정확히 하나 존재하고 활성 상태이며 Admin 역할을 가지고 있음을 보장한다.
   멱등(idempotent)하므로 재시작해도 안전하다.
 * :func:`seed_demo_data` — 쇼케이스 픽스처(데모 사용자·연결·PII 패턴·백업·감사로그·
@@ -31,7 +31,7 @@ logger = get_logger("backend.seed")
 
 # 실제 운영용 admin 계정 — 이 값은 공유 계약이므로 변경 시 전체 영향도 확인 필요.
 ADMIN_EMAIL = "admin"
-ADMIN_PASSWORD = "admin_st"
+ADMIN_PASSWORD = "admin"
 ADMIN_DISPLAY_NAME = "Administrator"
 
 

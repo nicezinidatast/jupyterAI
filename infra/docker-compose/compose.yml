@@ -3,7 +3,7 @@ name: dataplatform-0521
 # Live-reload demo stack:
 #   - backend: source mount + uvicorn --reload (.py 저장 시 자동 재시작)
 #   - SPA × 4: Vite dev server in container + source mount (HMR — .tsx 저장 시 즉시 반영)
-#   - Postgres / Redis / JupyterLab: 그대로
+#   - Postgres / Redis / JupyterHub(DockerSpawner): 그대로
 x-restart: &restart
   restart: unless-stopped
 
@@ -122,7 +122,7 @@ services:
       - spa-analyst
       - spa-platform
       - backend
-      - jupyter
+      - jupyterhub
     ports:
       - "5180:80"
 
@@ -235,44 +235,7 @@ services:
       retries: 40
       start_period: 60s
 
-  jupyter:
-    # Custom image: scipy-notebook + jupysql + plotly + DB drivers + startup
-    # script that pre-registers `sales_engine` / `crm_engine` and binds %%sql.
-    # See infra/jupyter/{Dockerfile,requirements.txt,startup/00-platform.py}.
-    build:
-      context: ../jupyter
-      dockerfile: Dockerfile
-    <<: *restart
-    # Safety cap on a small shared box (the analysts all share this ONE server).
-    # Without it, a single user loading a huge dataframe could exhaust the host
-    # and OOM-kill the whole stack (login/DB included). This bounds Jupyter (the
-    # server + every user kernel) so the platform survives; if a kernel blows the
-    # limit only that kernel dies. Tune to the host: leave ~2-3 GB for the
-    # backend/portal/SQLite + OS (e.g. raise to 5g on an 8 GB box if needed).
-    mem_limit: 4g
-    command:
-      - start-notebook.py
-      - --ServerApp.token=dataplatform
-      - --ServerApp.password=
-      - --ServerApp.allow_origin=*
-      - --ServerApp.disable_check_xsrf=True
-      - --ServerApp.tornado_settings={"headers":{"Content-Security-Policy":"frame-ancestors *"}}
-      - --ServerApp.base_url=/jupyter/
-      # Expose `window.jupyterapp` inside the Lab page so the SPA (same
-      # origin via the portal) can target the *active* notebook for copilot
-      # cell insertion instead of always writing to copilot.ipynb.
-      - --LabApp.expose_app_in_browser=True
-    environment:
-      JUPYTER_ENABLE_LAB: "yes"
-      # DSNs for the auto-registered SQLAlchemy engines. Hostnames are the
-      # docker-network service names — the same ones the backend uses.
-      DATAPLATFORM_SALES_DSN: postgresql+psycopg2://demo:demo@demo-postgres:5432/sales
-      DATAPLATFORM_CRM_DSN: mysql+pymysql://demo:demo@demo-mysql:3306/crm
-    ports:
-      - "8888:8888"
-    volumes:
-      - jupyter-data:/home/jovyan/work
-      - uploads-data:/home/jovyan/work/uploads
+  # ── 기존 단일-공유 jupyter 서비스 삭제, JupyterHub로 대체 ──────────────
 
   # ────────────────────────────────────────────────────────────────────
   # Demo data sources — real DB containers that the platform connects to
@@ -357,24 +320,68 @@ services:
       - 'ollama pull "$$OLLAMA_MODEL" && echo "model ready: $$OLLAMA_MODEL"'
     restart: "no"
 
+  # JupyterHub (DockerSpawner) — 사용자별 격리 컨테이너. base_url=/jupyter/.
+  # docker.sock 마운트가 필요한 이유: DockerSpawner가 호스트 Docker 데몬으로
+  # 사용자 노트북 컨테이너를 스폰/종료하기 때문이다.
   jupyterhub:
     build:
       context: ../jupyterhub
       dockerfile: Dockerfile
+    # 명시 image 태그 — 아래 jupyter-gc 가 같은 이미지를 재사용해 빌드를 1회로 묶는다.
+    image: dataplatform/jupyterhub:0.1.0
     <<: *restart
-    profiles: ["full"]
     environment:
       BACKEND_URL: http://backend:8000
+      USER_IMAGE: dataplatform/notebook-user:0.1.0
+      # DockerSpawner는 사용자 컨테이너를 스폰할 때 compose 네트워크에 붙인다.
+      # dev 프로젝트명 dataplatform-0521 → 기본 네트워크 dataplatform-0521_default.
+      DOCKER_NETWORK: dataplatform-0521_default
+      JUPYTERHUB_ACTIVE_SERVER_LIMIT: ${JUPYTERHUB_ACTIVE_SERVER_LIMIT:-3}
+      JUPYTERHUB_USER_MEM_LIMIT: ${JUPYTERHUB_USER_MEM_LIMIT:-1.5G}
+      JUPYTERHUB_USER_CPU_LIMIT: ${JUPYTERHUB_USER_CPU_LIMIT:-2.0}
+      # 노트북 서버 회수 정책: 30분 유휴 + 1일 하드캡(자원 절약).
+      JUPYTERHUB_CULL_TIMEOUT: ${JUPYTERHUB_CULL_TIMEOUT:-1800}
+      JUPYTERHUB_CULL_MAX_AGE: ${JUPYTERHUB_CULL_MAX_AGE:-86400}
     depends_on:
       - backend
-    ports:
-      - "8001:8000"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    # 포털이 /jupyter/ 를 프록시하므로 호스트 포트 노출 불필요.
+    # 디버그 접근이 필요할 때만 아래 주석을 풀 것.
+    # ports:
+    #   - "8001:8000"
+
+  # jupyter-gc — 사용자 볼륨 1일 정리 루프(허브 이미지 재사용, 닫힌 망 안전).
+  # idle-culler 가 서버(RAM)를 내리면, 이 루프가 분리되고 1일 지난
+  # jupyterhub-user-* 볼륨(디스크)을 삭제한다. 사용 중 볼륨은 절대 건드리지 않음.
+  jupyter-gc:
+    image: dataplatform/jupyterhub:0.1.0
+    build:
+      context: ../jupyterhub
+      dockerfile: Dockerfile
+    <<: *restart
+    command: ["python", "/srv/jupyterhub/volume_gc.py"]
+    environment:
+      GC_RETENTION_SECONDS: ${JUPYTERHUB_DATA_RETENTION_SECONDS:-86400}
+      GC_INTERVAL_SECONDS: ${JUPYTERHUB_GC_INTERVAL_SECONDS:-3600}
+    depends_on:
+      - jupyterhub
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # jupyter-user-image — DockerSpawner가 이름으로 이미지를 찾으므로
+  # `docker compose build` 단계에서 미리 빌드해 두기 위한 더미 서비스.
+  # command: ["true"] 덕분에 `up` 시 즉시 종료(restart: "no")하여 스택에 영향 없음.
+  jupyter-user-image:
+    build:
+      context: ../jupyterhub/user-image
+      dockerfile: Dockerfile
+    image: dataplatform/notebook-user:0.1.0
+    command: ["true"]
+    restart: "no"
 
 volumes:
   redis-data:
-  jupyter-data:
   demo-postgres-data:
   demo-mysql-data:
   uploads-data:

@@ -17,9 +17,37 @@ import os
 
 import httpx
 from jupyterhub.auth import Authenticator
+from jupyterhub.handlers import BaseHandler
+from tornado import web
+
+
+class PlatformLoginHandler(BaseHandler):
+    """쿼리 파라미터 ``platform_token``으로 즉시 로그인시키는 SSO 핸들러.
+
+    SPA가 iframe을 ``/jupyter/hub/login?platform_token=<t>&next=<userlab>`` 로 보내면,
+    로그인 폼 입력 없이 토큰만으로 인증하고 허브 로그인 쿠키를 설정한 뒤 ``next`` 로
+    리다이렉트한다. ``login_user``가 내부적으로 PlatformAuthenticator.authenticate를
+    호출하므로 검증 로직은 한곳(아래 authenticate)에만 둔다.
+    """
+
+    async def get(self):
+        token = self.get_argument("platform_token", "")
+        user = await self.login_user({"platform_token": token})
+        if user is None:
+            # 토큰이 없거나 백엔드 검증 실패 → 로그인 거부.
+            raise web.HTTPError(403, "platform_token 검증 실패")
+        self.redirect(self.get_argument("next", self.hub.server.base_url))
 
 
 class PlatformAuthenticator(Authenticator):
+    # 자체 username/password 폼 대신 위 핸들러로 자동 로그인한다.
+    # SPA가 토큰을 쿼리로 전달하는 SSO 흐름이라 폼 렌더링이 필요 없다.
+    auto_login = True
+
+    def get_handlers(self, app):  # noqa: ARG002
+        # 기본 /login 폼 핸들러를 토큰 기반 SSO 핸들러로 교체한다.
+        return [(r"/login", PlatformLoginHandler)]
+
     async def authenticate(self, handler, data):  # noqa: ARG002
         """플랫폼 토큰을 백엔드에 검증하고 JupyterHub 사용자 딕셔너리를 반환한다.
 
@@ -57,4 +85,7 @@ class PlatformAuthenticator(Authenticator):
 
         # auth_state에 토큰을 포함해 반환하면, JupyterHub가 이를 암호화해 DB에 저장한다.
         # 이후 spawner가 사용자 컨테이너 기동 시 이 토큰을 환경변수로 주입할 수 있다.
-        return {"name": r.json().get("user_id"), "auth_state": {"token": token}}
+        # /api/auth/me 응답은 {"user": {...}} 형태라 user_id는 user 안에 중첩돼 있다.
+        body = r.json()
+        user_id = (body.get("user") or {}).get("user_id")
+        return {"name": user_id, "auth_state": {"token": token}}

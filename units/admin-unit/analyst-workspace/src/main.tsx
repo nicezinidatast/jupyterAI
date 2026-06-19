@@ -127,10 +127,9 @@ const api = {
       // 백엔드는 { user: {...} } 로 감싸 내려주므로, UI가 쓰는 평면 Me로 푼다.
       return r.json().then((d) => {
         const u = d.user as Me;
-        // 분석가마다 전용 copilot 노트북(copilot-<id>.ipynb)을 갖게 한다 —
-        // 사용자 식별이 가능한 가장 이른 시점이 여기(me 응답)이므로 여기서
-        // 사용자별 노트북 경로/작업 폴더 전역값을 확정한다.
-        setCopilotNotebookForUser(u?.email);
+        // 사용자별 JupyterHub 서버 베이스를 확정한다. 허브 사용자명은 user_id(UUID)이며,
+        // 사용자 식별이 가능한 가장 이른 시점이 여기(me 응답)이다.
+        setCopilotNotebookForUser(u?.user_id);
         return u;
       });
     }),
@@ -660,14 +659,26 @@ function JupyterLab({ connectionId }: { connectionId: string | null }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // 사용자별 JupyterHub 서버로 들어간다. httpOnly 세션 쿠키는 JS가 직접 못 읽으므로
+      // 백엔드에서 허브 로그인용 단기 토큰을 받아 허브의 토큰 SSO 로그인으로 넘긴다.
+      // 허브가 토큰을 검증하고 사용자별 컨테이너를 스폰한 뒤 그 사람의 Lab으로 보낸다.
+      let token = '';
       try {
-        await ensureUserDir();
+        const r = await fetch('/api/auth/jupyter-token', { credentials: 'include' });
+        if (r.ok) token = ((await r.json()) as { token?: string }).token ?? '';
       } catch {
-        /* 폴더 생성 실패 — Jupyter 루트로 폴백한다(USER_DIR 빈 값). */
+        /* 토큰 발급 실패 — 토큰 없이 시도(허브가 거부하면 사용자가 재로그인) */
       }
       if (cancelled) return;
-      const tree = USER_DIR ? `/tree/${USER_DIR}` : '';
-      setSrc(`/jupyter/lab${tree}?token=${JUPYTER_TOKEN}&reset`);
+      // next는 허브의 spawn 엔드포인트로 둔다. 로그인 직후 사용자 서버를(없으면)
+      // 스폰하고, 끝나면 그 사람의 Lab(/jupyter/user/<id>/lab, default_url=/lab)으로
+      // 리다이렉트한다. /user/<id>/lab로 곧장 가면 서버 미기동 시 허브가 424를 내므로,
+      // 반드시 spawn을 거쳐 자동 기동시킨다. 첫 스폰은 컨테이너 기동에 시간이 걸려
+      // 허브의 "서버 시작 중" 화면이 잠깐 보였다가 Lab으로 전환된다.
+      const next = '/jupyter/hub/spawn';
+      setSrc(
+        `/jupyter/hub/login?platform_token=${encodeURIComponent(token)}&next=${encodeURIComponent(next)}`,
+      );
     })();
     return () => {
       cancelled = true;
@@ -732,59 +743,36 @@ function JupyterLab({ connectionId }: { connectionId: string | null }) {
 // 주의: 이 4개 값은 모듈 전역 가변 상태다. setCopilotNotebookForUser가 me
 // 응답 시점에 한 번 덮어쓰면, 이후 모든 Jupyter contents API 호출이 같은
 // 사용자별 경로를 바라본다(REST 헬퍼들이 이 전역을 직접 참조).
-let COPILOT_NOTEBOOK = 'copilot.ipynb'; // Jupyter 루트 기준 전체 경로
-let COPILOT_NOTEBOOK_NAME = 'copilot.ipynb'; // 파일명(basename)만
-let USER_DIR = ''; // '' = Jupyter 루트. 사용자 확정 시 work/<id>로 설정
-const JUPYTER_TOKEN = 'dataplatform';
-let COPILOT_NOTEBOOK_URL = `/jupyter/api/contents/${COPILOT_NOTEBOOK}`;
+// 사용자별 JupyterHub 서버의 베이스 경로. /me의 user_id(=허브 사용자명)로 확정된다.
+// 사용자마다 컨테이너가 분리되므로 서버 루트(/home/jovyan/work)가 곧 개인 공간 →
+// copilot 노트북은 루트의 copilot.ipynb 하나면 충분하다(work/<id> 하위폴더·공유 토큰 불필요).
+let JUPYTER_USER_BASE = '/jupyter'; // 확정 전 임시. 확정 후 /jupyter/user/<id>
+let COPILOT_NOTEBOOK = 'copilot.ipynb'; // 사용자 서버 루트 기준 경로
+let COPILOT_NOTEBOOK_NAME = 'copilot.ipynb'; // 파일명(basename)
+let COPILOT_NOTEBOOK_URL = `${JUPYTER_USER_BASE}/api/contents/${COPILOT_NOTEBOOK}`;
 
-// 사용자 식별자(이메일)를 받아 사용자별 폴더·노트북 경로 전역값을 확정한다.
-// 이메일을 파일시스템에 안전한 슬러그로 정규화: 소문자화 → [a-z0-9_.-] 외
-// 문자는 _로 치환 → 40자 컷. 빈 결과면 'user'로 폴백(빈 경로 방지).
-function setCopilotNotebookForUser(username: string | null | undefined): void {
-  const safe =
-    (username || 'user').toLowerCase().replace(/[^a-z0-9_.-]/g, '_').slice(0, 40) || 'user';
-  USER_DIR = `work/${safe}`;
-  COPILOT_NOTEBOOK_NAME = `copilot-${safe}.ipynb`;
-  COPILOT_NOTEBOOK = `${USER_DIR}/${COPILOT_NOTEBOOK_NAME}`;
-  COPILOT_NOTEBOOK_URL = `/jupyter/api/contents/${COPILOT_NOTEBOOK}`;
+// /me의 user_id(=JupyterHub 사용자명)로 사용자별 서버 베이스를 확정한다. 서버 자체가
+// 분리돼 있어 노트북 경로는 루트의 copilot.ipynb로 고정한다 — 예전처럼 파일명에 사용자
+// 슬러그를 넣을 필요가 없다(격리는 서버·볼륨이 보장하므로).
+function setCopilotNotebookForUser(userId: string | null | undefined): void {
+  const id = (userId || '').trim();
+  JUPYTER_USER_BASE = id ? `/jupyter/user/${encodeURIComponent(id)}` : '/jupyter';
+  COPILOT_NOTEBOOK = 'copilot.ipynb';
+  COPILOT_NOTEBOOK_NAME = 'copilot.ipynb';
+  COPILOT_NOTEBOOK_URL = `${JUPYTER_USER_BASE}/api/contents/${COPILOT_NOTEBOOK}`;
 }
 
-// 사용자 작업 폴더를 Jupyter contents API로 만든다(경로 세그먼트마다 멱등하게).
-// 이렇게 해야 /lab/tree/<dir> 열기와 그 안에 copilot 노트북 쓰기가 둘 다
-// 성공한다. `work`는 마운트된 볼륨이라 이미 존재하므로, 보통은 마지막
-// work/<id> 세그먼트만 새로 만든다. GET 404면 없는 것 → PUT으로 디렉터리 생성.
+// 사용자별 서버에서는 루트(/home/jovyan/work)가 이미 개인 공간이고 copilot.ipynb를
+// 루트에 두므로, 따로 만들어 줄 디렉터리가 없다. 호출부 호환을 위해 no-op로 남긴다.
 async function ensureUserDir(): Promise<void> {
-  if (!USER_DIR) return;
-  const parts = USER_DIR.split('/');
-  let prefix = '';
-  // 'work', 'work/<id>' 처럼 누적 경로를 하나씩 검사·생성한다(상위가 없으면
-  // 하위 PUT이 404 나므로 위에서부터 순서대로).
-  for (const part of parts) {
-    prefix = prefix ? `${prefix}/${part}` : part;
-    const head = await fetch(`/jupyter/api/contents/${prefix}?_=${Date.now()}`, {
-      headers: copilotApiHeaders(),
-      credentials: 'omit',
-      cache: 'no-store',
-    });
-    if (head.ok) continue; // 이미 있음 → 다음 세그먼트로
-    if (head.status !== 404) throw new Error(`Jupyter GET dir failed: ${head.status}`);
-    const put = await fetch(`/jupyter/api/contents/${prefix}`, {
-      method: 'PUT',
-      headers: copilotApiHeaders(),
-      credentials: 'omit',
-      body: JSON.stringify({ type: 'directory' }),
-    });
-    if (!put.ok) throw new Error(`Jupyter mkdir failed: ${put.status}`);
-  }
+  return;
 }
 
-// Jupyter contents API용 공통 요청 헤더(아래 모든 copilot.ipynb 호출이 같은
-// 인증·no-cache 방식을 공유). credentials는 'omit'으로 두고 토큰 인증만 쓴다.
+// Jupyter contents API용 공통 요청 헤더(아래 모든 copilot.ipynb 호출이 공유).
+// 인증은 허브 OAuth 쿠키로 한다(공유 토큰 제거) — 호출부는 반드시 credentials:'include'.
 function copilotApiHeaders(): HeadersInit {
   return {
     'Content-Type': 'application/json',
-    Authorization: `token ${JUPYTER_TOKEN}`,
     // 이중 안전장치: 캐시된 GET이 방금(사용자가, 혹은 직전 턴이) 추가한 셀을
     // 못 보고 옛 본문을 재사용하면, 이어지는 PUT이 새 셀을 덮어써 버린다.
     // 그 경합을 막으려고 no-cache를 명시한다.
@@ -816,7 +804,7 @@ async function putCopilotNotebook(content: any): Promise<void> {
   const put = await fetch(COPILOT_NOTEBOOK_URL, {
     method: 'PUT',
     headers: copilotApiHeaders(),
-    credentials: 'omit',
+    credentials: 'include',
     body: JSON.stringify({ type: 'notebook', format: 'json', content }),
   });
   if (!put.ok) {
@@ -836,7 +824,7 @@ async function appendCellToCopilotNotebook(language: 'sql' | 'python', source: s
   // `?_=` 캐시 무력화용 더미 파라미터 — jupyter는 모르는 쿼리 파라미터를 무시한다.
   const head = await fetch(`${url}?_=${Date.now()}`, {
     headers,
-    credentials: 'omit',
+    credentials: 'include',
     cache: 'no-store',
   });
   if (head.ok) {
@@ -1071,13 +1059,12 @@ function getActiveNotebookPanel(): any | null {
 async function ensureCopilotFileExists(): Promise<void> {
   const head = await fetch(`${COPILOT_NOTEBOOK_URL}?_=${Date.now()}`, {
     headers: copilotApiHeaders(),
-    credentials: 'omit',
+    credentials: 'include',
     cache: 'no-store',
   });
   if (head.ok) return;
   if (head.status !== 404) throw new Error(`Jupyter GET failed: ${head.status}`);
-  // 노트북은 work/<id>/ 아래에 있으므로 그 폴더가 먼저 있어야 한다 — 안 그러면
-  // 부모 디렉터리가 없어 PUT이 404 난다.
+  // 노트북은 사용자 서버 루트에 두므로 따로 만들 부모 디렉터리가 없다(ensureUserDir는 no-op).
   await ensureUserDir();
   await putCopilotNotebook(emptyCopilotNotebook().content);
 }
@@ -1157,29 +1144,70 @@ function stripCodeFences(text: string): string {
     .trim();
 }
 
-// 활성 노트북의 셀들을 끌어와, 다음 턴에서 모델이 그것을 참조/리팩토링할 수
-// 있게 컨텍스트 프롬프트를 만든다. 우선순위는 라이브 공유 모델(지금 분석가가
-// 보고 있는 미저장 편집까지 포함) → REST copilot.ipynb 폴백 순(fetchNotebookContext).
-function buildNotebookContextPrompt(
-  path: string,
-  codeCells: string[],
-): { prompt: string; cellCount: number } {
-  // 셀이 없으면 빈 프롬프트 — 호출부에서 원 질문만 그대로 보낸다.
-  if (codeCells.length === 0) return { prompt: '', cellCount: 0 };
-  // 셀마다 "--- Cell #n ---" 구분선을 붙여 모델이 셀 경계를 인식하게 한다.
-  const body = codeCells
-    .map((s, i) => `--- Cell #${i + 1} ---\n${s}`)
-    .join('\n\n');
-  const prompt =
-    `현재 활성 노트북(${path})에 들어있는 코드 셀입니다. ` +
-    `사용자의 새 요청이 "이 코드 수정/리팩토링/이어서" 같은 의도면 ` +
-    `이 셀들을 기준으로 답하세요. 새 셀이 필요하면 새 코드 블록을 추가하세요.\n\n` +
-    body;
-  return { prompt, cellCount: codeCells.length };
+// 빈 채팅 화면에 띄우는 예시 프롬프트 — 클릭하면 입력창에 채워진다. 노트북
+// 코딩 어시스턴트의 대표 동작(불러오기·시각화·수정·정리)을 한눈에 보여 줘,
+// 처음 쓰는 사람도 "무엇을 시킬 수 있는지" 바로 감을 잡게 한다.
+const EXAMPLE_PROMPTS = [
+  'uploads 폴더의 CSV를 불러와 요약 통계를 보여줘',
+  '이 데이터프레임을 월별 매출 막대그래프로 그려서 셀에 추가해줘',
+  '방금 셀에서 난 에러를 고쳐줘',
+  '이 코드를 함수로 리팩토링해줘',
+  '결측치를 처리하고 정리하는 셀을 추가해줘',
+];
+
+// 코드 셀의 실행 오류(traceback)를 짧게 추출한다. 라이브 공유 모델 셀과
+// nbformat JSON 셀 모두 outputs 배열을 갖는다. "방금 에러 고쳐줘" 같은 요청에서
+// 모델이 원인을 보고 고칠 수 있도록, 에러가 있으면 그 텍스트를 컨텍스트에 싣는다.
+// ANSI 색코드는 지우고 길이를 제한한다(긴 traceback이 프롬프트를 잠식하지 않게).
+function extractCellError(cell: any): string | undefined {
+  try {
+    const outputs: any[] = cell?.outputs ?? cell?.getOutputs?.() ?? [];
+    for (const o of outputs) {
+      if (o?.output_type === 'error' || o?.ename) {
+        const tb = Array.isArray(o.traceback) ? o.traceback.join('\n') : '';
+        const raw = (tb || `${o.ename ?? 'Error'}: ${o.evalue ?? ''}`)
+          .replace(/\x1b\[[0-9;]*m/g, ''); // ANSI 이스케이프 제거
+        return raw.slice(0, 1500);
+      }
+    }
+  } catch {
+    /* outputs 접근 실패 — 에러 컨텍스트 없이 진행 */
+  }
+  return undefined;
 }
 
-// 활성 노트북의 코드 셀을 모아 컨텍스트 프롬프트를 만든다. 라이브 모델 우선,
-// 실패 시 REST 폴백.
+// 활성 노트북의 셀(과 실행 오류)을 끌어와, 다음 턴에서 모델이 그것을 참조·
+// 수정·리팩토링할 수 있게 컨텍스트 프롬프트를 만든다. 우선순위는 라이브 공유
+// 모델(지금 분석가가 보고 있는 미저장 편집까지 포함) → REST copilot.ipynb 폴백.
+function buildNotebookContextPrompt(
+  path: string,
+  cells: { source: string; error?: string }[],
+): { prompt: string; cellCount: number } {
+  // 셀이 없으면 빈 프롬프트 — 호출부에서 원 질문만 그대로 보낸다.
+  if (cells.length === 0) return { prompt: '', cellCount: 0 };
+  // 셀마다 "--- Cell #n ---" 구분선 + (있으면) 그 셀의 오류를 붙여, 모델이 셀
+  // 경계와 "어디서 에러가 났는지"를 인식하게 한다.
+  let body = cells
+    .map((c, i) => {
+      const head = `--- Cell #${i + 1} ---\n${c.source}`;
+      return c.error ? `${head}\n[이 셀 실행 오류]\n${c.error}` : head;
+    })
+    .join('\n\n');
+  // 백엔드 question 한도(8000자)를 넘겨 422가 나지 않도록 컨텍스트 본문을 상한
+  // 안에서 자른다(사용자 질문 몫을 남겨 둔다). 노트북이 커도 채팅은 막히지 않는다.
+  const MAX_CONTEXT = 6000;
+  if (body.length > MAX_CONTEXT) body = body.slice(0, MAX_CONTEXT) + '\n…(이하 생략)';
+  const prompt =
+    `현재 활성 노트북(${path})의 코드 셀입니다. 사용자의 요청이 ` +
+    `"이 코드 수정/리팩토링/이어서/에러 고쳐" 같은 의도면 이 셀들을 기준으로 ` +
+    `답하고, 오류가 표시된 셀이 있으면 그 원인을 고친 코드를 주세요. ` +
+    `새 셀이 필요하면 새 코드 블록을 추가하세요.\n\n` +
+    body;
+  return { prompt, cellCount: cells.length };
+}
+
+// 활성 노트북의 코드 셀(과 오류)을 모아 컨텍스트 프롬프트를 만든다. 라이브
+// 모델 우선, 실패 시 REST 폴백.
 async function fetchNotebookContext(): Promise<{
   prompt: string;
   cellCount: number;
@@ -1187,15 +1215,15 @@ async function fetchNotebookContext(): Promise<{
   const panel = getActiveNotebookPanel();
   if (panel) {
     try {
-      // 라이브 경로: 분석가가 지금 보고 있는(미저장 편집 포함) 셀을 그대로 읽는다.
+      // 라이브 경로: 분석가가 지금 보고 있는(미저장 편집 포함) 셀 + 실행 오류를 읽는다.
       const shared = panel.content.model.sharedModel;
-      const codeCells: string[] = [];
+      const codeCells: { source: string; error?: string }[] = [];
       for (const c of shared.cells ?? []) {
         if (c?.cell_type !== 'code') continue;
         const s = (
           typeof c.getSource === 'function' ? c.getSource() : String(c.source ?? '')
         ).trim();
-        if (s) codeCells.push(s); // 빈 셀은 제외
+        if (s) codeCells.push({ source: s, error: extractCellError(c) }); // 빈 셀은 제외
       }
       return buildNotebookContextPrompt(panel.context.path as string, codeCells);
     } catch {
@@ -1209,12 +1237,10 @@ async function fetchNotebookContext(): Promise<{
   const timer = window.setTimeout(() => ctrl.abort(), 4000);
   try {
     const r = await fetch(
-      `/jupyter/api/contents/${COPILOT_NOTEBOOK}?_=${Date.now()}`,
+      `${COPILOT_NOTEBOOK_URL}?_=${Date.now()}`,
       {
-        headers: {
-          Authorization: `token ${JUPYTER_TOKEN}`,
-          'Cache-Control': 'no-cache',
-        },
+        headers: { 'Cache-Control': 'no-cache' },
+        credentials: 'include',
         cache: 'no-store',
         signal: ctrl.signal,
       },
@@ -1222,12 +1248,15 @@ async function fetchNotebookContext(): Promise<{
     if (!r.ok) return { prompt: '', cellCount: 0 };
     const nb = await r.json();
     const cells: any[] = nb?.content?.cells ?? [];
-    // nbformat의 source는 문자열 또는 줄 단위 문자열 배열이라 둘 다 처리한다.
+    // nbformat의 source는 문자열 또는 줄 단위 배열이라 둘 다 처리하고, 에러
+    // 출력이 있으면 함께 싣는다.
     const codeCells = cells
       .filter((c) => c.cell_type === 'code')
-      .map((c) => (Array.isArray(c.source) ? c.source.join('') : c.source ?? ''))
-      .map((s: string) => s.trim())
-      .filter((s) => s.length > 0);
+      .map((c) => ({
+        source: (Array.isArray(c.source) ? c.source.join('') : c.source ?? '').trim(),
+        error: extractCellError(c),
+      }))
+      .filter((c) => c.source.length > 0);
     return buildNotebookContextPrompt(COPILOT_NOTEBOOK, codeCells);
   } catch {
     return { prompt: '', cellCount: 0 };
@@ -1313,9 +1342,18 @@ function CopilotPanel({
       // 사용자가 실제로 보고 있는 셀을 함께 싣게 한다. 채팅 UI엔 여전히
       // 원본 질문만 보이고, API 페이로드만 컨텍스트로 증강된다.
       const { prompt: nbPrompt } = await fetchNotebookContext();
-      const augmentedQuestion = nbPrompt
+      let augmentedQuestion = nbPrompt
         ? `${nbPrompt}\n\n---\n\n사용자 요청:\n${question}`
         : question;
+      // 백엔드 question 한도(8000자) 안전 상한. 초과하면 컨텍스트(앞부분)를 먼저
+      // 줄여 사용자 질문은 보존하고, 그래도 길면(질문 자체가 매우 긺) 마지막에 하드 컷.
+      const QLIMIT = 7900;
+      if (augmentedQuestion.length > QLIMIT && nbPrompt) {
+        const tail = `\n\n---\n\n사용자 요청:\n${question}`;
+        const room = Math.max(0, QLIMIT - tail.length);
+        augmentedQuestion = nbPrompt.slice(0, room) + tail;
+      }
+      if (augmentedQuestion.length > QLIMIT) augmentedQuestion = augmentedQuestion.slice(0, QLIMIT);
 
       const res = await fetch('/api/copilot/chat', {
         method: 'POST',
@@ -1437,8 +1475,11 @@ function CopilotPanel({
       gap="sm"
       style={{ height: 'calc(100vh - 88px)', overflow: 'hidden' }}
     >
-      <Group justify="space-between">
-        <Title order={5}>🤖 다분석할Zini</Title>
+      <Group justify="space-between" align="flex-start">
+        <div>
+          <Title order={5}>🤖 다분석할Zini</Title>
+          <Text size="xs" c="dimmed">노트북 분석 코파일럿 · 코드 생성·수정</Text>
+        </div>
         {providerName && <Badge variant="light">{providerName}</Badge>}
       </Group>
 
@@ -1458,11 +1499,29 @@ function CopilotPanel({
         }}
       >
         {history.length === 0 && !pending && (
-          <Text size="sm" c="dimmed" style={{ flexShrink: 0 }}>
-            예: "지난 30일 매출 상위 도시 5개 알려줘" — 커넥션을 고르면 스키마 컨텍스트를 자동 주입합니다.
-            응답에 SQL/Python 코드가 포함되면 현재 활성화된 노트북에 자동으로 셀을 추가합니다
-            (열린 노트북이 없으면 {COPILOT_NOTEBOOK_NAME}).
-          </Text>
+          <Stack gap="xs" style={{ flexShrink: 0 }}>
+            <Text size="sm" c="dimmed">
+              노트북 분석 코파일럿입니다. 파이썬·판다스 코드를 <b>만들고 고치는</b> 걸
+              도와드려요. 자연어로 말하면 코드를 생성해 노트북 셀로 넣고, 각 셀의{' '}
+              <b>✨ 버튼</b>으로는 그 셀을 바로 고칠 수 있어요. 지금 열려 있는 노트북의
+              셀과 <b>실행 에러</b>를 함께 참고하니, "방금 에러 고쳐줘"처럼 이어서 시켜도 됩니다.
+            </Text>
+            <Text size="xs" c="dimmed">이렇게 시켜 보세요 — 누르면 입력창에 채워집니다:</Text>
+            <Group gap="xs" wrap="wrap">
+              {EXAMPLE_PROMPTS.map((ex) => (
+                <Button
+                  key={ex}
+                  size="xs"
+                  variant="light"
+                  color="grape"
+                  style={{ fontWeight: 400 }}
+                  onClick={() => setInput(ex)}
+                >
+                  {ex}
+                </Button>
+              ))}
+            </Group>
+          </Stack>
         )}
 
         {history.map((m, i) => {
@@ -1534,7 +1593,7 @@ function CopilotPanel({
 
       <Group gap={6}>
         <Textarea
-          placeholder="자연어로 질문하세요…"
+          placeholder="코드를 만들거나 고쳐 달라고 하세요 — 예: 'uploads/sales.csv 불러와 월별 매출 그래프 그려줘'"
           value={input}
           onChange={(e) => setInput(e.currentTarget.value)}
           onKeyDown={(e) => {
@@ -1549,7 +1608,9 @@ function CopilotPanel({
           ▶ 보내기
         </Button>
       </Group>
-      <Text size="xs" c="dimmed">⌘/Ctrl + Enter 로 전송 — 응답은 스트리밍됩니다.</Text>
+      <Text size="xs" c="dimmed">
+        ⌘/Ctrl + Enter 전송 · 코드는 <b>📥 셀에 삽입</b>으로 노트북에 넣고, 노트북 셀의 <b>✨</b>로 그 셀을 고칩니다.
+      </Text>
     </Stack>
   );
 }
@@ -1818,11 +1879,21 @@ function Shell() {
     );
   }
 
-  // 로그아웃: 백엔드 세션을 지운 뒤, 성공/실패와 무관하게 로그인 페이지로
-  // 보낸다(finally) — 서버 응답이 실패해도 클라이언트는 일단 빠져나가게 한다.
+  // 로그아웃: 백엔드 세션 + JupyterHub 세션을 모두 지운 뒤, 성공/실패와
+  // 무관하게 로그인 페이지로 보낸다(finally) — 서버 응답이 실패해도 클라이언트는
+  // 일단 빠져나가게 한다. 허브 로그아웃(/jupyter/hub/logout)을 함께 호출하는
+  // 이유: dp_session만 지우면 허브 로그인 쿠키와 사용자 노트북 컨테이너가 남아,
+  // 공용 PC에서 앞사람 서버가 RAM을 계속 점유한다(유출은 아님 — 다음 사람이
+  // 토큰으로 재로그인하면 허브가 그 사람으로 전환). 허브 logout은 쿠키를 지우고,
+  // 허브 설정의 shutdown_on_logout=True가 그 사용자 컨테이너를 즉시 회수한다.
+  // 두 호출 모두 best-effort(실패해도 무시) — 어차피 로그인 페이지로 나간다.
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+      await Promise.allSettled([
+        fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }),
+        // 허브 logout은 GET. 리다이렉트 본문은 필요 없으니 결과를 보지 않는다.
+        fetch('/jupyter/hub/logout', { credentials: 'include' }),
+      ]);
     } finally {
       window.location.assign('/login/');
     }

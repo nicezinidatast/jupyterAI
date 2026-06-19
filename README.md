@@ -109,7 +109,7 @@ docker compose -f infra/docker-compose/compose.yml ps
 | 관리자 콘솔 | http://localhost:5180/admin/ | 사용자/감사 등 운영 |
 | 감사자 콘솔 | http://localhost:5180/auditor/ | 감사 로그 조회 |
 
-- **관리자 계정**: `admin` / `admin_st` (최초 부팅 시 자동 생성).
+- **관리자 계정**: `admin` / `admin` (최초 부팅 시 자동 생성).
 - 일반 사용자는 로그인 화면에서 **자유롭게 회원가입**합니다.
 - `/platform` 은 예전 페르소나 선택 페이지로, URL로만 접근됩니다(메뉴에 노출 안 됨).
 
