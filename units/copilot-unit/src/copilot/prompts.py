@@ -15,9 +15,9 @@ from typing import Any
 _BASE_PROMPT = """\
 You are an interactive coding assistant embedded in a JupyterLab notebook. You
 help analysts explore data and WRITE & MODIFY CODE through conversation. The
-primary language is Python (pandas, numpy, matplotlib/plotly). Analysts upload
-data files (CSV/TSV/JSON/Parquet/Excel) into the workspace and read them from
-~/work/ (uploads land in ~/work/uploads/).
+primary language is Python (pandas, numpy, matplotlib/plotly). Analysts keep
+their data files (CSV/TSV/JSON/Parquet/Excel) in the workspace and read them
+from ~/work/.
 
 You are often given the user's CURRENT notebook cells — and any execution
 errors — as context. Use them:
@@ -70,8 +70,8 @@ def build_system_prompt(
         # 기본 경로: SQL DB 없음 — 업로드 파일 기반 Python 워크플로 안내.
         parts.append(
             "\nNo SQL database is attached — this is a file-based workflow. Help "
-            "the user load and analyze their uploaded files (in ~/work/, uploads "
-            "in ~/work/uploads/) with Python/pandas, and generate or fix notebook "
-            "cells. Do not ask for a database connection."
+            "the user load and analyze their data files (in ~/work/) with "
+            "Python/pandas, and generate or fix notebook cells. Do not ask for a "
+            "database connection."
         )
     return "\n".join(parts)

@@ -1148,7 +1148,7 @@ function stripCodeFences(text: string): string {
 // 코딩 어시스턴트의 대표 동작(불러오기·시각화·수정·정리)을 한눈에 보여 줘,
 // 처음 쓰는 사람도 "무엇을 시킬 수 있는지" 바로 감을 잡게 한다.
 const EXAMPLE_PROMPTS = [
-  'uploads 폴더의 CSV를 불러와 요약 통계를 보여줘',
+  'CSV 파일을 불러와 요약 통계를 보여줘',
   '이 데이터프레임을 월별 매출 막대그래프로 그려서 셀에 추가해줘',
   '방금 셀에서 난 에러를 고쳐줘',
   '이 코드를 함수로 리팩토링해줘',
@@ -1593,7 +1593,7 @@ function CopilotPanel({
 
       <Group gap={6}>
         <Textarea
-          placeholder="코드를 만들거나 고쳐 달라고 하세요 — 예: 'uploads/sales.csv 불러와 월별 매출 그래프 그려줘'"
+          placeholder="코드를 만들거나 고쳐 달라고 하세요 — 예: 'sales.csv 불러와 월별 매출 그래프 그려줘'"
           value={input}
           onChange={(e) => setInput(e.currentTarget.value)}
           onKeyDown={(e) => {
