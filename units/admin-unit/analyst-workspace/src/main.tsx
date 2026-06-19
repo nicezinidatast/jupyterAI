@@ -255,86 +255,6 @@ function ChartPicker({ result }: { result: QueryResult }) {
   );
 }
 
-type UploadResult = {
-  file_id: string;
-  safe_name: string;
-  size_bytes: number;
-  kind: string;
-  mime: string;
-  jupyter_path: string;
-  hint: string;
-};
-
-// 데이터 파일을 JupyterLab 작업 폴더로 곧장 올리는 업로드 카드. 업로드된
-// 파일은 ~/work/uploads/ 에 떨어져 노트북에서 바로 읽을 수 있다(내부망
-// 워크플로의 핵심 진입점 — DB 커넥션 없이 파일만으로 분석 시작).
-function FileUploadCard() {
-  const [busy, setBusy] = useState(false);
-  const [last, setLast] = useState<UploadResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const onFiles = async (files: FileList | null) => {
-    if (!files || !files.length) return;
-    setError(null);
-    setBusy(true);
-    // multipart/form-data로 전송 — Content-Type 헤더는 브라우저가 boundary와
-    // 함께 자동으로 채우게 두고(직접 지정하면 boundary가 빠져 깨진다) 첫 파일만 보낸다.
-    const form = new FormData();
-    form.append('upload', files[0]);
-    try {
-      const r = await fetch('/api/files/upload', { method: 'POST', body: form });
-      if (!r.ok) {
-        // 백엔드가 detail에 사람이 읽을 사유(용량 초과·지원 안 하는 형식 등)를
-        // 담아 주면 그걸 우선 노출하고, 없으면 상태 코드로 폴백한다.
-        const body = await r.json().catch(() => ({}));
-        throw new Error(body.detail ?? `${r.status} ${r.statusText}`);
-      }
-      const data = (await r.json()) as UploadResult;
-      setLast(data);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Card withBorder padding="sm" radius="md">
-      <Group justify="space-between" align="center">
-        <div>
-          <Text fw={600}>📂 파일 업로드</Text>
-          <Text size="xs" c="dimmed">
-            CSV / TSV / JSON / Parquet / Excel / Feather — 최대 1 GiB. 업로드된 파일은
-            JupyterLab의 <Code>~/work/uploads/</Code> 에서 바로 읽을 수 있어요.
-          </Text>
-        </div>
-        <Button
-          component="label"
-          variant="light"
-          loading={busy}
-        >
-          파일 선택
-          <input
-            type="file"
-            style={{ display: 'none' }}
-            accept=".csv,.tsv,.json,.jsonl,.ndjson,.parquet,.xlsx,.feather,.arrow"
-            onChange={(e) => onFiles(e.currentTarget.files)}
-          />
-        </Button>
-      </Group>
-      {error && <Notification color="red" title="업로드 실패" mt="sm">{error}</Notification>}
-      {last && (
-        <Stack gap={4} mt="sm">
-          <Text size="sm">
-            ✓ <strong>{last.safe_name}</strong> ({Math.round(last.size_bytes / 1024)} KiB)
-          </Text>
-          <Text size="xs" c="dimmed">JupyterLab에서: <Code>{last.hint}</Code></Text>
-        </Stack>
-      )}
-    </Card>
-  );
-}
-
 // 빠른 SQL 편집·실행 화면. 현재 라우팅에서는 비활성(JupyterLab + LLM 중심으로
 // 전환)이지만, 커넥션 선택 → 스키마 뱃지 → SQL 실행 → 표/차트 → 노트북 저장의
 // 전체 흐름을 담고 있어 코드는 보존한다.
@@ -398,7 +318,6 @@ function QueryEditor() {
 
   return (
     <Stack p="md" gap="md">
-      <FileUploadCard />
       <Group align="flex-end">
         <Select
           label="커넥션"
