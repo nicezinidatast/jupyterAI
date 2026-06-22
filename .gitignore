@@ -74,9 +74,15 @@ infra/trivy/
 .DS_Store
 Thumbs.db
 
-# AI-DLC working
-.omc/state/
-.omc/notepad.md
+# AI-DLC / OMC 작업 상태 — 오케스트레이션 로컬 상태·프로브 산출물(모든 깊이). 공유 X.
+# (옛 `.omc/state/`·`.omc/notepad.md` 는 루트만 잡아 중첩 `infra/.../.omc`·프로브 파일이 새던 것 교정.)
+.omc/
+
+# 본인 회상·작업 메타 (공유 X) — README 와 별개의 내부 회상 문서(매 사이클 재작성).
+#   FOR_DEVELOPER.md : 내부 회상/구조·의사결정 메모.
+#   CHANGELOG.md     : 사이클 변경 로그(내부 회상용). 외부 공유 산출물은 docs/external/ 또는 README.md.
+FOR_DEVELOPER.md
+CHANGELOG.md
 
 # 외부 산출물(브로슈어·매뉴얼 등 docs/external 산출물) — 결과물이라 추적하지 않음
 /docs/
