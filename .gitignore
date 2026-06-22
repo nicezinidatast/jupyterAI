@@ -77,3 +77,6 @@ Thumbs.db
 # AI-DLC working
 .omc/state/
 .omc/notepad.md
+
+# 외부 산출물(브로슈어·매뉴얼 등 docs/external 산출물) — 결과물이라 추적하지 않음
+/docs/
