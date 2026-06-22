@@ -1,6 +1,10 @@
-# main 외 브랜치에 push 하면 main 으로 향하는 PR 을 자동으로 연다(이미 열려 있으면 생략).
+# main 외 브랜치에 push 하면 main 으로 향하는 PR 을 자동으로 연다.
+# 이미 열려 있으면 '제목·본문을 갱신'한다(매 push 마다 최신 커밋 내용으로 정리됨).
 #
-# ※ PR 을 'PAT'(개인 액세스 토큰)로 생성하는 이유:
+#  - 제목 : 브랜치명 대신 'main 이후 첫 커밋 제목'(그 브랜치의 핵심 작업)으로 적절히 표기.
+#  - 본문 : main 이후 커밋들을 '변경 요약' 목록으로 정리 → 스쿼시 머지 시 깔끔한 커밋이 됨.
+#
+# ※ PR 을 'PAT'(개인 액세스 토큰)로 생성/갱신하는 이유:
 #   GitHub 규칙상 기본 GITHUB_TOKEN 으로 만든 PR 의 'opened' 이벤트는 다른 워크플로
 #   (Claude 검토·CI)를 트리거하지 못한다. 사용자 PAT 로 만들면 정상 트리거된다.
 #   → push 한 번으로  PR 자동 생성 → 자동 검토 → 자동 CI  가 모두 돈다.
@@ -8,6 +12,12 @@
 # ── 필요한 GitHub Secret ──
 #   PAT_FOR_PR : fine-grained PAT (이 저장소만). 권한 = Pull requests: Read/Write + Contents: Read.
 #                repo Settings → Secrets and variables → Actions 에 등록.
+#
+# ── 권장 저장소 설정(머지 결과를 깔끔히) ──
+#   Settings → General → Pull Requests
+#     · Allow squash merging 체크
+#     · "Default commit message" = Pull request title and description
+#   → 스쿼시 머지 시 위에서 정리한 제목/본문이 main 커밋 메시지로 그대로 들어간다.
 name: Auto PR
 
 on:
@@ -23,23 +33,43 @@ concurrency:
 
 jobs:
   open-pr:
-    name: 브랜치 push → PR 자동 생성
+    name: 브랜치 push → PR 자동 생성·갱신
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: 열린 PR 없으면 생성
+        with:
+          fetch-depth: 0            # main 과 비교(커밋 목록 산출)하려면 전체 히스토리 필요
+      - name: PR 생성 또는 제목·본문 갱신
         env:
           GH_TOKEN: ${{ secrets.PAT_FOR_PR }}       # PAT 로 인증 → 이 PR 이 검토/CI 를 트리거
         run: |
+          set -euo pipefail
           branch="${GITHUB_REF_NAME}"
-          num=$(gh pr list --head "$branch" --base main --state open --json number --jq '.[0].number')
-          if [ -n "$num" ]; then
-            echo "이미 PR #$num 가 열려 있음 — 생성 생략 (이후 push 는 synchronize 로 재검토)"
-            exit 0
-          fi
-          # PR 제목: 브랜치명 대신 최신 커밋 제목(한 줄)을 사용 — 훨씬 읽기 쉽다. 비면 브랜치명으로 폴백.
-          title=$(git log -1 --pretty=%s)
+
+          # main 최신 tip 확보 → 이 브랜치만의 커밋 범위 계산
+          git fetch --quiet origin main
+          base="$(git rev-parse FETCH_HEAD)"
+
+          # 제목: main 이후 '첫' 커밋 제목(브랜치의 핵심 작업). 없으면 브랜치명으로 폴백.
+          title="$(git log --reverse --pretty=format:'%s' "${base}..HEAD" | head -n1)"
           [ -z "$title" ] && title="$branch"
-          gh pr create --base main --head "$branch" \
-            --title "$title" \
-            --body "자동 생성된 PR입니다 (브랜치 \`$branch\`). Claude 검토 코멘트와 CI 결과를 확인하고, 문제 없으면 승인 후 머지하세요. 머지되면 self-hosted 러너로 prod 자동 배포됩니다(배포 시작/완료 Slack 알림)."
+
+          # 본문: 변경 요약(커밋 목록) — 커밋 내용을 그대로 평가하지 않도록 파일로 작성
+          {
+            echo "## 변경 요약"
+            git log --reverse --pretty=format:'- %s' "${base}..HEAD"
+            echo ""
+            echo ""
+            echo "---"
+            echo "자동 생성/갱신된 PR입니다. Claude 검토 코멘트와 CI 결과를 확인하고, 문제 없으면 승인 후 머지하세요."
+            echo "머지(스쿼시 권장)되면 self-hosted 러너로 prod 자동 배포됩니다(배포 시작/완료 Slack 알림)."
+          } > pr_body.md
+
+          num="$(gh pr list --head "$branch" --base main --state open --json number --jq '.[0].number')"
+          if [ -n "$num" ]; then
+            echo "PR #$num 이미 열림 → 제목/본문 갱신"
+            gh pr edit "$num" --title "$title" --body-file pr_body.md
+          else
+            echo "열린 PR 없음 → 생성"
+            gh pr create --base main --head "$branch" --title "$title" --body-file pr_body.md
+          fi
