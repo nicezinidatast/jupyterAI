@@ -49,6 +49,9 @@ jobs:
   deploy:
     name: prod 배포 (self-hosted)
     runs-on: [self-hosted]
+    # 실패 로그 꼬리를 다른 러너의 notify-result 로 넘기기 위한 job output(러너 간 파일 공유 불가).
+    outputs:
+      log_tail: ${{ steps.tail.outputs.log_tail }}
     defaults:
       run:
         shell: bash
@@ -56,10 +59,24 @@ jobs:
     steps:
       - name: git reset --hard + compose up --build
         run: |
-          git fetch --prune origin main
-          git reset --hard origin/main
-          docker compose -f infra/docker-compose/compose.prod.yml up -d --build --remove-orphans
-          docker image prune -f
+          # 출력을 Actions 로그에 그대로 스트리밍하면서 파일로도 남긴다(실패 시 꼬리만 알림으로).
+          # shell: bash 기본이 -eo pipefail 이라 중간 명령이 실패하면 그 지점까지 출력 후 즉시 실패.
+          {
+            git fetch --prune origin main
+            git reset --hard origin/main
+            docker compose -f infra/docker-compose/compose.prod.yml up -d --build --remove-orphans
+            docker image prune -f
+          } 2>&1 | tee "$RUNNER_TEMP/deploy.log"
+      - name: 실패 로그 꼬리 추출 (→ Slack)
+        id: tail
+        if: failure()
+        working-directory: ${{ runner.temp }}
+        run: |
+          {
+            echo 'log_tail<<__LOGEOF__'
+            tail -n 20 "$RUNNER_TEMP/deploy.log" 2>/dev/null || echo '(deploy.log 없음 — 단계 진입 전 실패일 수 있음)'
+            echo '__LOGEOF__'
+          } >> "$GITHUB_OUTPUT"
 
   # 배포 종료 알림(Slack) — 클라우드 러너에서. deploy 결과를 성공/실패로 보고.
   notify-result:
@@ -69,8 +86,24 @@ jobs:
     if: ${{ always() }}
     steps:
       - uses: actions/checkout@v4
+      - name: 결과 상세 구성 (실패면 로그 꼬리 첨부)
+        id: detail
+        env:
+          RESULT: ${{ needs.deploy.result }}
+          LOG_TAIL: ${{ needs.deploy.outputs.log_tail }}
+        run: |
+          det="prod: ${RESULT}"
+          if [ "$RESULT" = "failure" ] && [ -n "${LOG_TAIL:-}" ]; then
+            # Slack mrkdwn 코드블록으로 실패 로그 마지막 줄을 덧붙인다.
+            det="$(printf '%s\n*실패 로그(마지막 줄):*\n```\n%s\n```' "$det" "$LOG_TAIL")"
+          fi
+          {
+            echo 'details<<__DETEOF__'
+            printf '%s\n' "$det"
+            echo '__DETEOF__'
+          } >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/slack-notify
         with:
           webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
           status: ${{ needs.deploy.result == 'success' && 'success' || 'failure' }}
-          details: "prod: ${{ needs.deploy.result }}"
+          details: ${{ steps.detail.outputs.details }}
