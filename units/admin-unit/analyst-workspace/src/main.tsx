@@ -735,6 +735,20 @@ async function putCopilotNotebook(content: any): Promise<void> {
 // 덧붙인 뒤 통째로 PUT한다. 라이브 모델(insertCellIntoNotebook)이 실패하거나
 // 열린 노트북이 없을 때만 쓴다 — 파일을 직접 고치므로 iframe은 "디스크에서
 // 바뀜"을 모른 채 새로고침이 필요할 수 있다.
+// 빈(소스가 없는) 코드 셀인지 — 새 노트북을 열 때 JupyterLab이 자동으로 넣는
+// 기본 빈 셀이 코파일럿이 꽂은 셀과 함께 남는 걸 정리하기 위함. 코파일럿이 만든
+// 셀(copilot_generated)은 비어 있어도 건드리지 않는다(의도된 빈 셀 보호).
+function isEmptyCodeCell(c: any): boolean {
+  if (!c || c.cell_type !== 'code') return false;
+  const src = typeof c.getSource === 'function' ? c.getSource() : c.source;
+  const text = Array.isArray(src) ? src.join('') : String(src ?? '');
+  const generated =
+    (typeof c.getMetadata === 'function'
+      ? c.getMetadata()?.copilot_generated
+      : c?.metadata?.copilot_generated) ?? false;
+  return text.trim() === '' && !generated;
+}
+
 async function appendCellToCopilotNotebook(language: 'sql' | 'python', source: string): Promise<void> {
   const url = COPILOT_NOTEBOOK_URL;
   const headers = copilotApiHeaders();
@@ -763,6 +777,9 @@ async function appendCellToCopilotNotebook(language: 'sql' | 'python', source: s
     outputs: [],
     execution_count: null,
   };
+  // 디스크 노트북에 남아 있는 빈 코드 셀(예: Lab 기본 빈 셀)을 먼저 걷어내고 붙인다.
+  const prev: any[] = Array.isArray(notebook.content.cells) ? notebook.content.cells : [];
+  notebook.content.cells = prev.filter((c) => !isEmptyCodeCell(c));
   notebook.content.cells.push(cell);
   notebook.type = 'notebook';
   notebook.format = 'json';
@@ -1018,6 +1035,18 @@ async function insertCellIntoNotebook(
         source: language === 'sql' ? `%%sql\n${source}` : source,
         metadata: { copilot_generated: true, language },
       });
+      // 새 노트북을 열 때 Lab이 자동으로 넣는 기본 빈 셀이 함께 남는 걸 정리한다.
+      // 셀이 전부 사라지지 않게 최소 1개는 남기고, 정리 실패는 무시(삽입은 이미 성공).
+      try {
+        const sm = panel.content.model.sharedModel;
+        for (let i = sm.cells.length - 1; i >= 0 && sm.cells.length > 1; i--) {
+          if (isEmptyCodeCell(sm.cells[i]) && typeof sm.deleteCell === 'function') {
+            sm.deleteCell(i);
+          }
+        }
+      } catch {
+        /* 빈 셀 정리 실패 — 삽입은 유지 */
+      }
       try {
         await panel.context.save();
       } catch {
