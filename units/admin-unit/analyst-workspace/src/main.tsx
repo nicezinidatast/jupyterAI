@@ -1250,7 +1250,9 @@ async function listContentsDir(dir: string, signal: AbortSignal): Promise<any[]>
 // 절대 포함하지 않는다. 파싱은 전부 브라우저에서 하고 결과 메타데이터만 나간다
 // (파일 본문은 백엔드·모델로 가지 않음).
 type FileColumn = { name: string; type: string };
-type FileProfile = { path: string; rows: number | null; columns: FileColumn[] };
+// headerRow: 진짜 헤더가 있는 행 인덱스(0-based). 0보다 크면 위에 제목/설명 행이
+// 있다는 뜻 — 모델이 코드에서 pd.read_excel(header=N)로 그만큼 건너뛰게 한다.
+type FileProfile = { path: string; rows: number | null; columns: FileColumn[]; headerRow?: number };
 
 // path|size 로 캐시 — 한 세션에서 같은 파일을 매 메시지마다 다시 받지 않게.
 // 값이 null 이면 "프로파일 불가(또는 비어 있음)"로 확정돼 재시도하지 않는다.
@@ -1313,6 +1315,23 @@ function splitDelimited(line: string, delim: string): string[] {
   return out;
 }
 
+// 업무용 엑셀·CSV는 표 위에 제목/설명/빈 줄이 있는 경우가 흔하다(예: "[NICE]…
+// 배정 현황" → "성수기 기간 …" → 실제 헤더). 진짜 헤더 행을 찾는다: 제목 행은
+// 보통 한 칸만 차고(narrow), 헤더·데이터 행은 여러 칸이 가득 찬다(wide). 첫 번째
+// "거의 가득 찬" 행을 헤더로 본다. 표가 아니거나 한 열짜리면 그냥 0행.
+function detectHeaderRow(rows: any[][]): number {
+  const widths = rows.map((r) =>
+    Array.isArray(r) ? r.filter((c) => String(c ?? '').trim() !== '').length : 0,
+  );
+  const maxW = Math.max(0, ...widths);
+  if (maxW <= 1) return 0;
+  const threshold = Math.max(2, maxW - 1);
+  for (let i = 0; i < widths.length; i++) {
+    if (widths[i] >= threshold) return i;
+  }
+  return 0;
+}
+
 function profileText(path: string, ext: string, text: string): FileProfile | null {
   if (ext === 'json') {
     try {
@@ -1334,13 +1353,16 @@ function profileText(path: string, ext: string, text: string): FileProfile | nul
   const delim = ext === 'tsv' ? '\t' : text.indexOf('\t') >= 0 && text.indexOf(',') < 0 ? '\t' : ',';
   const lines = text.split(/\r?\n/).filter((l) => l.length > 0);
   if (lines.length === 0) return null;
-  const header = splitDelimited(lines[0], delim).map((h) => h.trim().replace(/^"|"$/g, ''));
-  const body = lines.slice(1, 1 + MAX_SNIFF_ROWS).map((l) => splitDelimited(l, delim));
+  // 상단 제목/설명 행을 건너뛰고 진짜 헤더 행을 찾는다(첫 25행으로 판단).
+  const probe = lines.slice(0, 25).map((l) => splitDelimited(l, delim));
+  const hdr = detectHeaderRow(probe);
+  const header = (probe[hdr] || []).map((h) => String(h).trim().replace(/^"|"$/g, ''));
+  const body = lines.slice(hdr + 1, hdr + 1 + MAX_SNIFF_ROWS).map((l) => splitDelimited(l, delim));
   const columns = header
     .slice(0, MAX_COLS_PER_FILE)
     .map((name, i) => ({ name: name || `col${i + 1}`, type: inferType(body.map((r) => r[i])) }));
   if (columns.length === 0) return null;
-  return { path, rows: Math.max(0, lines.length - 1), columns };
+  return { path, rows: Math.max(0, lines.length - (hdr + 1)), columns, headerRow: hdr };
 }
 
 async function profileXlsx(path: string, bytes: Uint8Array): Promise<FileProfile | null> {
@@ -1356,8 +1378,10 @@ async function profileXlsx(path: string, bytes: Uint8Array): Promise<FileProfile
   if (!sheet) return null;
   const aoa: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: '' });
   if (!aoa.length) return null;
-  const header: string[] = (aoa[0] || []).map((h: unknown) => String(h ?? '').trim());
-  const body = aoa.slice(1);
+  // 상단 제목/설명 행을 건너뛰고 진짜 헤더 행을 찾는다(첫 25행으로 판단).
+  const hdr = detectHeaderRow(aoa.slice(0, 25));
+  const header: string[] = (aoa[hdr] || []).map((h: unknown) => String(h ?? '').trim());
+  const body = aoa.slice(hdr + 1);
   const columns = header
     .slice(0, MAX_COLS_PER_FILE)
     .map((name: string, i: number) => ({
@@ -1365,7 +1389,7 @@ async function profileXlsx(path: string, bytes: Uint8Array): Promise<FileProfile
       type: inferType(body.map((r: any[]) => r?.[i])),
     }));
   if (columns.length === 0) return null;
-  return { path, rows: body.length, columns };
+  return { path, rows: body.length, columns, headerRow: hdr };
 }
 
 // 파일 한 개의 컬럼 메타데이터를 뽑는다(캐시 적용). parquet·초대용량은 건너뛴다.
@@ -1475,8 +1499,13 @@ async function fetchWorkdirFiles(): Promise<string> {
       const prof = profByPath.get(String(c.path || c.name));
       if (prof && prof.columns.length) {
         const rowsTxt = prof.rows != null ? `, ${prof.rows.toLocaleString()}행` : '';
+        // 헤더가 첫 행이 아니면(위에 제목/설명) 모델이 코드에서 그만큼 건너뛰게 알림.
+        const hdrTxt =
+          prof.headerRow && prof.headerRow > 0
+            ? `, 상단 ${prof.headerRow}행은 제목/설명 — 읽을 때 header=${prof.headerRow}`
+            : '';
         const cols = prof.columns.map((col) => `${col.name}(${col.type})`).join(', ');
-        return `- ${name}${kb}${rowsTxt}${recent}\n  컬럼: ${cols}`;
+        return `- ${name}${kb}${rowsTxt}${hdrTxt}${recent}\n  컬럼: ${cols}`;
       }
       return `- ${name}${kb}${recent}`;
     });
