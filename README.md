@@ -212,4 +212,15 @@ aidlc-docs/                 # 설계 문서
 
 ## 라이선스
 
-내부 사용 전용.
+이 저장소의 자체 코드는 **내부 사용 전용**입니다.
+
+이 플랫폼에 임베드된 주피터 스택은 전부 **Project Jupyter 공식 오픈소스**이며, 모두 **BSD 3-Clause(Modified/Revised BSD) 라이선스**입니다. 베이스 이미지·패키지를 그대로 사용하며 포크·소스 벤더링은 없습니다.
+
+| 구성 요소 | 저장소 내 근거 | 공식 출처 | 라이선스 |
+|---|---|---|---|
+| JupyterHub 4.0 (멀티유저 허브) | `infra/jupyterhub/Dockerfile` (`FROM jupyterhub/jupyterhub:4.0`) | [github.com/jupyterhub/jupyterhub](https://github.com/jupyterhub/jupyterhub) (Docker Hub `jupyterhub/jupyterhub`) | BSD 3-Clause |
+| JupyterLab (사용자 노트북 서버) | `infra/jupyterhub/user-image/Dockerfile`, `infra/jupyter/Dockerfile` (`FROM quay.io/jupyter/scipy-notebook`) | [github.com/jupyter/docker-stacks](https://github.com/jupyter/docker-stacks) (`quay.io/jupyter/scipy-notebook`) | BSD 3-Clause |
+| JupyterLab 확장 SDK | `units/admin-unit/jupyter-extensions/package.json` (`@jupyterlab/*`, `@lumino/widgets`) | [github.com/jupyterlab/jupyterlab](https://github.com/jupyterlab/jupyterlab) | BSD 3-Clause |
+| DockerSpawner / jupyterhub-idle-culler | `infra/jupyterhub/Dockerfile` (pip) | [github.com/jupyterhub/dockerspawner](https://github.com/jupyterhub/dockerspawner) · [github.com/jupyterhub/jupyterhub-idle-culler](https://github.com/jupyterhub/jupyterhub-idle-culler) | BSD 3-Clause |
+
+> 참고: Jupyter Docker Stacks 이미지는 2023-10-20부터 Docker Hub가 아닌 `quay.io/jupyter/` 네임스페이스로만 게시됩니다. 각 컴포넌트의 라이선스 전문은 위 공식 저장소의 `LICENSE` 파일에서 확인할 수 있습니다.
