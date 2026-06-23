@@ -1197,15 +1197,168 @@ async function listContentsDir(dir: string, signal: AbortSignal): Promise<any[]>
   return Array.isArray(j?.content) ? j.content : [];
 }
 
-// 작업 폴더(~/work 루트 + uploads/ 한 단계)의 데이터 파일 목록을 컨텍스트
-// 문자열로 만든다. 모델이 파일명을 되묻지 않고 곧바로 불러오는 완전한 분석
-// 코드를 쓰게 하기 위함이다.
-// 거버넌스(FR-LLM-05): 파일 "이름·크기"만 싣는다 — 파일 내용·행 데이터는 절대
-// 읽지 않는다(contents API의 디렉터리 GET은 파일 본문을 반환하지 않는다).
+// ── 파일 프로파일(컬럼 메타데이터) ──────────────────────────────────────────
+// "이 파일 뭐야 / 뭐 할 수 있어" 같은 탐색형 질문에, 모델이 실제 컬럼을 보고
+// "리조트 목록이고 지역·가동률… 컬럼이 있습니다" 라고 답할 수 있게 컬럼 정보를
+// 컨텍스트에 싣는다.
+// 거버넌스(FR-LLM-05): 추출·전송하는 건 컬럼명·자료형·행 수뿐 — 실제 셀(행) 값은
+// 절대 포함하지 않는다. 파싱은 전부 브라우저에서 하고 결과 메타데이터만 나간다
+// (파일 본문은 백엔드·모델로 가지 않음).
+type FileColumn = { name: string; type: string };
+type FileProfile = { path: string; rows: number | null; columns: FileColumn[] };
+
+// path|size 로 캐시 — 한 세션에서 같은 파일을 매 메시지마다 다시 받지 않게.
+// 값이 null 이면 "프로파일 불가(또는 비어 있음)"로 확정돼 재시도하지 않는다.
+const _profileCache = new Map<string, FileProfile | null>();
+
+const MAX_PROFILE_FILES = 8; // 한 번에 컬럼까지 볼 최대 파일 수(나머지는 이름만)
+const MAX_PROFILE_BYTES = 8 * 1024 * 1024; // 8MB 초과 파일은 받지 않고 이름만(지연 회피)
+const MAX_SNIFF_ROWS = 100; // 자료형 추론에 볼 표본 행 수
+const MAX_COLS_PER_FILE = 60; // 컨텍스트 비대화 방지
+
+function b64ToBytes(b64: string): Uint8Array {
+  const bin = atob(String(b64).replace(/\s/g, ''));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+// 한글 CSV는 utf-8 또는 euc-kr(cp949) 둘 다 흔하다. utf-8 디코드에 깨짐(U+FFFD)이
+// 보이면 euc-kr 로 재시도한다 — 헤더(컬럼명)만 정확히 뽑으면 충분.
+function decodeText(bytes: Uint8Array): string {
+  const utf8 = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  if (!utf8.includes('�')) return utf8;
+  try {
+    return new TextDecoder('euc-kr', { fatal: false }).decode(bytes);
+  } catch {
+    return utf8;
+  }
+}
+
+// 표본 값으로 컬럼 자료형을 거칠게 추론한다(number/date/bool/text). 정밀하진 않지만
+// 모델에 "이 컬럼은 수치/날짜" 힌트를 주기엔 충분하다.
+function inferType(values: unknown[]): string {
+  const vals = values
+    .map((v) => (v == null ? '' : String(v).trim()))
+    .filter((v) => v !== '')
+    .slice(0, MAX_SNIFF_ROWS);
+  if (vals.length === 0) return 'text';
+  if (vals.every((v) => /^(true|false|yes|no|y|n)$/i.test(v))) return 'bool';
+  if (vals.every((v) => v !== '' && Number.isFinite(Number(v.replace(/,/g, ''))))) return 'number';
+  if (vals.every((v) => /^\d{4}[-/.]\d{1,2}([-/.]\d{1,2})?/.test(v))) return 'date';
+  return 'text';
+}
+
+// 따옴표(quoted)·이스케이프를 처리하는 가벼운 구분자 파서. 헤더·표본 추출용.
+function splitDelimited(line: string, delim: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let q = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (q) {
+      if (c === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; } else q = false;
+      } else cur += c;
+    } else if (c === '"') q = true;
+    else if (c === delim) { out.push(cur); cur = ''; }
+    else cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+
+function profileText(path: string, ext: string, text: string): FileProfile | null {
+  if (ext === 'json') {
+    try {
+      const j = JSON.parse(text);
+      const arr = Array.isArray(j) ? j : Array.isArray(j?.data) ? j.data : null;
+      if (arr && arr.length && arr[0] && typeof arr[0] === 'object') {
+        const sample = arr.slice(0, MAX_SNIFF_ROWS);
+        const columns = Object.keys(arr[0])
+          .slice(0, MAX_COLS_PER_FILE)
+          .map((name) => ({ name, type: inferType(sample.map((r: any) => r?.[name])) }));
+        return { path, rows: arr.length, columns };
+      }
+    } catch {
+      /* 배열-of-객체가 아니면 컬럼 개념 없음 → null */
+    }
+    return null;
+  }
+  // csv / tsv / txt
+  const delim = ext === 'tsv' ? '\t' : text.indexOf('\t') >= 0 && text.indexOf(',') < 0 ? '\t' : ',';
+  const lines = text.split(/\r?\n/).filter((l) => l.length > 0);
+  if (lines.length === 0) return null;
+  const header = splitDelimited(lines[0], delim).map((h) => h.trim().replace(/^"|"$/g, ''));
+  const body = lines.slice(1, 1 + MAX_SNIFF_ROWS).map((l) => splitDelimited(l, delim));
+  const columns = header
+    .slice(0, MAX_COLS_PER_FILE)
+    .map((name, i) => ({ name: name || `col${i + 1}`, type: inferType(body.map((r) => r[i])) }));
+  if (columns.length === 0) return null;
+  return { path, rows: Math.max(0, lines.length - 1), columns };
+}
+
+async function profileXlsx(path: string, bytes: Uint8Array): Promise<FileProfile | null> {
+  // SheetJS는 무겁다 — 동적 import로 별도 청크에 두어, 엑셀을 실제로 볼 때만 받는다.
+  const XLSX = await import('xlsx');
+  const wb = XLSX.read(bytes, { type: 'array' });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  if (!sheet) return null;
+  const aoa = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1, raw: true, defval: '' });
+  if (!aoa.length) return null;
+  const header = (aoa[0] || []).map((h) => String(h ?? '').trim());
+  const body = aoa.slice(1);
+  const columns = header
+    .slice(0, MAX_COLS_PER_FILE)
+    .map((name, i) => ({ name: name || `col${i + 1}`, type: inferType(body.map((r) => r?.[i])) }));
+  if (columns.length === 0) return null;
+  return { path, rows: body.length, columns };
+}
+
+// 파일 한 개의 컬럼 메타데이터를 뽑는다(캐시 적용). parquet·초대용량은 건너뛴다.
+async function profileEntry(entry: any, signal: AbortSignal): Promise<FileProfile | null> {
+  const path = String(entry.path || entry.name);
+  const size = typeof entry.size === 'number' ? entry.size : 0;
+  const key = `${path}|${size}`;
+  if (_profileCache.has(key)) return _profileCache.get(key) ?? null;
+  const ext = (path.split('.').pop() || '').toLowerCase();
+  // parquet은 브라우저 파싱이 어렵고, 너무 큰 파일은 다운로드 비용이 커 이름만 노출.
+  if (ext === 'parquet' || size > MAX_PROFILE_BYTES) {
+    _profileCache.set(key, null);
+    return null;
+  }
+  try {
+    const url =
+      `${JUPYTER_USER_BASE}/api/contents/${path.split('/').map(encodeURIComponent).join('/')}` +
+      `?content=1&format=base64&_=${Date.now()}`;
+    const r = await fetch(url, {
+      headers: { 'Cache-Control': 'no-cache' },
+      credentials: 'include',
+      cache: 'no-store',
+      signal,
+    });
+    if (!r.ok) return null; // 일시적일 수 있어 캐시하지 않음(다음 턴 재시도)
+    const j = await r.json();
+    const bytes = b64ToBytes(String(j?.content ?? ''));
+    const prof =
+      ext === 'xlsx' || ext === 'xls'
+        ? await profileXlsx(path, bytes)
+        : profileText(path, ext, decodeText(bytes));
+    _profileCache.set(key, prof); // 성공(또는 컬럼 없음=null) 모두 확정 캐시
+    return prof;
+  } catch {
+    return null; // 중단·파싱 예외는 캐시하지 않음
+  }
+}
+
+// 작업 폴더(~/work 루트 + uploads/ 한 단계)의 데이터 파일 목록 + 가능한 경우
+// 각 파일의 컬럼 정보를 컨텍스트 문자열로 만든다. 모델이 파일명·컬럼을 되묻지
+// 않고, 탐색형 질문엔 설명·제안을, 작업형엔 완전한 코드를 내게 하기 위함이다.
+// 거버넌스(FR-LLM-05): 컬럼명·자료형·행 수만 싣는다 — 실제 셀(행) 값은 포함 안 함.
 async function fetchWorkdirFiles(): Promise<string> {
-  // 4초 상한 — Jupyter가 느리거나 재시작 중이어도 채팅이 무한정 막히지 않게.
+  // 9초 상한 — 컬럼 프로파일링(파일 다운로드·파싱)을 포함해도 채팅이 무한정 막히지 않게.
   const ctrl = new AbortController();
-  const timer = window.setTimeout(() => ctrl.abort(), 4000);
+  const timer = window.setTimeout(() => ctrl.abort(), 9000);
   try {
     const root = await listContentsDir('', ctrl.signal);
     let entries = root.slice();
@@ -1213,23 +1366,38 @@ async function fetchWorkdirFiles(): Promise<string> {
     if (root.some((c) => c?.type === 'directory' && c?.name === 'uploads')) {
       entries = entries.concat(await listContentsDir('uploads', ctrl.signal));
     }
-    const files = entries
+    const dataFiles = entries
       .filter((c) => c?.type === 'file' && DATA_FILE_RE.test(String(c?.name ?? '')))
-      // 프롬프트가 비대해지지 않게 최대 50개로 제한.
-      .slice(0, 50)
-      .map((c) => {
-        const kb =
-          typeof c.size === 'number' ? ` (${Math.max(1, Math.round(c.size / 1024))}KB)` : '';
-        // path가 있으면 상대경로(예: uploads/abc.xlsx)로 — 커널 cwd(루트) 기준 그대로 읽힌다.
-        // 파일명에 개행/탭이 섞여 프롬프트 컨텍스트를 오염시키지 않도록 정제한다.
-        const name = String(c.path || c.name).replace(/[\r\n\t]/g, ' ');
-        return `- ${name}${kb}`;
-      });
-    if (files.length === 0) return '';
+      .slice(0, 50); // 프롬프트가 비대해지지 않게 최대 50개
+    if (dataFiles.length === 0) return '';
+
+    // 상위 N개만 컬럼까지 프로파일링(병렬·캐시). 나머지는 이름·크기만.
+    const profiles = await Promise.all(
+      dataFiles.slice(0, MAX_PROFILE_FILES).map((e) => profileEntry(e, ctrl.signal)),
+    );
+    const profByPath = new Map<string, FileProfile>();
+    profiles.forEach((p) => p && profByPath.set(p.path, p));
+
+    const lines = dataFiles.map((c) => {
+      // path가 있으면 상대경로(예: uploads/abc.xlsx)로 — 커널 cwd(루트) 기준 그대로 읽힌다.
+      // 파일명에 개행/탭이 섞여 프롬프트 컨텍스트를 오염시키지 않도록 정제한다.
+      const name = String(c.path || c.name).replace(/[\r\n\t]/g, ' ');
+      const kb = typeof c.size === 'number' ? ` (${Math.max(1, Math.round(c.size / 1024))}KB)` : '';
+      const prof = profByPath.get(String(c.path || c.name));
+      if (prof && prof.columns.length) {
+        const rowsTxt = prof.rows != null ? `, ${prof.rows.toLocaleString()}행` : '';
+        const cols = prof.columns.map((col) => `${col.name}(${col.type})`).join(', ');
+        return `- ${name}${kb}${rowsTxt}\n  컬럼: ${cols}`;
+      }
+      return `- ${name}${kb}`;
+    });
+
     return (
-      `작업 폴더(~/work)에 있는 데이터 파일 목록입니다. 사용자가 파일 분석을 요청하면 ` +
-      `아래 실제 파일명을 그대로 사용해 불러오는 코드를 쓰세요(파일명을 되묻지 마세요).\n` +
-      files.join('\n')
+      `작업 폴더(~/work)의 데이터 파일과, 가능한 경우 각 파일의 컬럼 정보입니다. ` +
+      `컬럼명·자료형·행 수만 포함하며 실제 셀 값은 포함하지 않습니다.\n` +
+      `사용자가 파일을 묻거나 분석을 요청하면 아래 실제 파일명·컬럼을 그대로 사용하세요 ` +
+      `(파일명·컬럼을 되묻지 마세요).\n` +
+      lines.join('\n')
     );
   } catch {
     return '';
@@ -1312,8 +1480,9 @@ function CopilotPanel({
 
     try {
       // 컨텍스트 두 가지를 병렬로 끌어온다:
-      //  (1) 작업 폴더의 데이터 파일 목록 — "abc.xlsx 분석해줘"에 파일명을 되묻지
-      //      않고 곧바로 불러오는 완전한 코드를 쓰게 한다(파일명만, 거버넌스 안전).
+      //  (1) 작업 폴더의 데이터 파일 + (가능하면) 컬럼 정보 — "이 파일 뭐야/뭐 할 수
+      //      있어"엔 설명·제안을, "분석해줘"엔 완전한 코드를 되묻지 않고 내게 한다
+      //      (컬럼명·자료형·행 수만 — 실제 셀 값은 미포함, 거버넌스 안전).
       //  (2) 라이브 노트북 셀·에러 — "이 코드 리팩토링/방금 에러 고쳐" 같은 후속 요청용.
       // 채팅 UI엔 여전히 원본 질문만 보이고, API 페이로드만 컨텍스트로 증강된다.
       const [filesPrompt, { prompt: nbPrompt }] = await Promise.all([
