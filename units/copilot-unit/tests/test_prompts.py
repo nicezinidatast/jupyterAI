@@ -33,6 +33,23 @@ def test_complete_analysis_directives() -> None:
     assert "optional" in low
 
 
+def test_exploration_directives() -> None:
+    """탐색형 질문('이 파일 뭐야 / 뭐 할 수 있어')엔 코드 대신 설명+제안을 내도록
+    안내하는지 확인. 작업형(완전 분석 코드) 지시와 분리된 분기여야 한다."""
+    import re
+
+    p = build_system_prompt(connection_engine="postgres", schema=None)
+    low = p.lower()
+    # 줄바꿈으로 래핑된 문구도 잡도록 공백을 정규화해 비교한다.
+    flat = re.sub(r"\s+", " ", low)
+    # 요청 종류를 탐색(EXPLORATION) vs 작업으로 나누는 분기가 있어야 한다.
+    assert "exploration" in low
+    # 탐색형엔 완전 분석 셀을 던지지 말라는 명시 지시.
+    assert "do not dump a full analysis cell" in flat
+    # 파일별 컬럼 메타데이터(이름/타입/행수)를 활용하라는 안내(값은 미포함).
+    assert "column names" in low
+
+
 def test_renders_tables_and_pii_marker() -> None:
     schema = {
         "tables": [
