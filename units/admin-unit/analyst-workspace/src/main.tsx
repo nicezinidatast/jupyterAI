@@ -1088,39 +1088,74 @@ function extractCellError(cell: any): string | undefined {
   return undefined;
 }
 
+// 코드 셀의 "실행 출력"(에러 제외)을 짧게 추출한다. execute_result·display_data의
+// text/plain과 stream 텍스트만 모은다. 내부망 LLM일 때만 컨텍스트에 실어 모델이
+// "방금 결과 봐줘"에 답하게 한다(거버넌스: 출력엔 실제 값이 있어 외부 API엔 미전송).
+function extractCellOutputs(cell: any, cap = 600): string {
+  try {
+    const outputs: any[] = cell?.outputs ?? cell?.getOutputs?.() ?? [];
+    const parts: string[] = [];
+    for (const o of outputs) {
+      let t = '';
+      if (o?.output_type === 'stream') {
+        t = Array.isArray(o.text) ? o.text.join('') : String(o.text ?? '');
+      } else if (o?.output_type === 'execute_result' || o?.output_type === 'display_data') {
+        const tp = o?.data?.['text/plain'];
+        t = Array.isArray(tp) ? tp.join('') : String(tp ?? '');
+      }
+      // 에러(output_type==='error')는 extractCellError가 따로 싣는다 — 여기선 제외.
+      if (t.trim()) parts.push(t.replace(/\x1b\[[0-9;]*m/g, '')); // ANSI 제거
+    }
+    const s = parts.join('\n').trim();
+    return s.length > cap ? s.slice(0, cap) + ' …(생략)' : s;
+  } catch {
+    return '';
+  }
+}
+
 // 활성 노트북의 셀(과 실행 오류)을 끌어와, 다음 턴에서 모델이 그것을 참조·
 // 수정·리팩토링할 수 있게 컨텍스트 프롬프트를 만든다. 우선순위는 라이브 공유
 // 모델(지금 분석가가 보고 있는 미저장 편집까지 포함) → REST copilot.ipynb 폴백.
 function buildNotebookContextPrompt(
   path: string,
-  cells: { source: string; error?: string }[],
+  cells: { source: string; error?: string; output?: string }[],
+  includeOutputs = false,
 ): { prompt: string; cellCount: number } {
   // 셀이 없으면 빈 프롬프트 — 호출부에서 원 질문만 그대로 보낸다.
   if (cells.length === 0) return { prompt: '', cellCount: 0 };
-  // 셀마다 "--- Cell #n ---" 구분선 + (있으면) 그 셀의 오류를 붙여, 모델이 셀
-  // 경계와 "어디서 에러가 났는지"를 인식하게 한다.
+  // 출력은 컨텍스트를 빠르게 채우므로, 최근 실행한 마지막 3개 셀의 출력만 싣는다.
+  const outputCutoff = cells.length - 3;
+  // 셀마다 "--- Cell #n ---" 구분선 + (있으면) 그 셀의 오류 + (내부망 LLM이고 최근
+  // 셀이면) 실행 출력을 붙여, 모델이 셀 경계·오류·결과를 인식하게 한다.
   let body = cells
     .map((c, i) => {
-      const head = `--- Cell #${i + 1} ---\n${c.source}`;
-      return c.error ? `${head}\n[이 셀 실행 오류]\n${c.error}` : head;
+      let block = `--- Cell #${i + 1} ---\n${c.source}`;
+      if (c.error) block += `\n[이 셀 실행 오류]\n${c.error}`;
+      if (includeOutputs && c.output && i >= outputCutoff) {
+        block += `\n[이 셀 출력]\n${c.output}`;
+      }
+      return block;
     })
     .join('\n\n');
   // 백엔드 question 한도(8000자)를 넘겨 422가 나지 않도록 컨텍스트 본문을 상한
   // 안에서 자른다(사용자 질문 몫을 남겨 둔다). 노트북이 커도 채팅은 막히지 않는다.
   const MAX_CONTEXT = 6000;
   if (body.length > MAX_CONTEXT) body = body.slice(0, MAX_CONTEXT) + '\n…(이하 생략)';
+  const outNote = includeOutputs
+    ? `최근 셀의 실행 결과도 "[이 셀 출력]"으로 포함했으니 "방금 결과" 같은 질문에 활용하세요. `
+    : '';
   const prompt =
     `현재 활성 노트북(${path})의 코드 셀입니다. 사용자의 요청이 ` +
     `"이 코드 수정/리팩토링/이어서/에러 고쳐" 같은 의도면 이 셀들을 기준으로 ` +
     `답하고, 오류가 표시된 셀이 있으면 그 원인을 고친 코드를 주세요. ` +
-    `새 셀이 필요하면 새 코드 블록을 추가하세요.\n\n` +
+    `${outNote}새 셀이 필요하면 새 코드 블록을 추가하세요.\n\n` +
     body;
   return { prompt, cellCount: cells.length };
 }
 
 // 활성 노트북의 코드 셀(과 오류)을 모아 컨텍스트 프롬프트를 만든다. 라이브
 // 모델 우선, 실패 시 REST 폴백.
-async function fetchNotebookContext(): Promise<{
+async function fetchNotebookContext(includeOutputs = false): Promise<{
   prompt: string;
   cellCount: number;
 }> {
@@ -1129,15 +1164,20 @@ async function fetchNotebookContext(): Promise<{
     try {
       // 라이브 경로: 분석가가 지금 보고 있는(미저장 편집 포함) 셀 + 실행 오류를 읽는다.
       const shared = panel.content.model.sharedModel;
-      const codeCells: { source: string; error?: string }[] = [];
+      const codeCells: { source: string; error?: string; output?: string }[] = [];
       for (const c of shared.cells ?? []) {
         if (c?.cell_type !== 'code') continue;
         const s = (
           typeof c.getSource === 'function' ? c.getSource() : String(c.source ?? '')
         ).trim();
-        if (s) codeCells.push({ source: s, error: extractCellError(c) }); // 빈 셀은 제외
+        if (s)
+          codeCells.push({
+            source: s,
+            error: extractCellError(c),
+            output: includeOutputs ? extractCellOutputs(c) : undefined,
+          }); // 빈 셀은 제외
       }
-      return buildNotebookContextPrompt(panel.context.path as string, codeCells);
+      return buildNotebookContextPrompt(panel.context.path as string, codeCells, includeOutputs);
     } catch {
       /* 라이브 읽기 실패 — 아래 REST 경로로 폴백 */
     }
@@ -1167,9 +1207,10 @@ async function fetchNotebookContext(): Promise<{
       .map((c) => ({
         source: (Array.isArray(c.source) ? c.source.join('') : c.source ?? '').trim(),
         error: extractCellError(c),
+        output: includeOutputs ? extractCellOutputs(c) : undefined,
       }))
       .filter((c) => c.source.length > 0);
-    return buildNotebookContextPrompt(COPILOT_NOTEBOOK, codeCells);
+    return buildNotebookContextPrompt(COPILOT_NOTEBOOK, codeCells, includeOutputs);
   } catch {
     return { prompt: '', cellCount: 0 };
   } finally {
@@ -1535,9 +1576,13 @@ function CopilotPanel({
       //      (컬럼명·자료형·행 수만 — 실제 셀 값은 미포함, 거버넌스 안전).
       //  (2) 라이브 노트북 셀·에러 — "이 코드 리팩토링/방금 에러 고쳐" 같은 후속 요청용.
       // 채팅 UI엔 여전히 원본 질문만 보이고, API 페이로드만 컨텍스트로 증강된다.
+      // 내부망 LLM(provider가 internal/*)일 때만 최근 셀 실행 출력을 컨텍스트에
+      // 싣는다 — 출력엔 실제 데이터 값이 있어 외부 API(anthropic 등)로는 보내지
+      // 않는다(거버넌스). 내부 모델은 사내망 안에 머무르므로 허용.
+      const includeOutputs = providerName.startsWith('internal');
       const [filesPrompt, { prompt: nbPrompt }] = await Promise.all([
         fetchWorkdirFiles(),
-        fetchNotebookContext(),
+        fetchNotebookContext(includeOutputs),
       ]);
       const contextParts = [filesPrompt, nbPrompt].filter(Boolean);
       const contextBlock = contextParts.join('\n\n');
