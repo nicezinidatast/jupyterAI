@@ -1183,9 +1183,11 @@ const DATA_FILE_RE = /\.(csv|tsv|txt|json|parquet|xlsx|xls)$/i;
 // {type:'directory', content:[{name, path, type, size}, …]} 형태가 온다.
 // 실패(404·권한·중단)는 빈 배열로 흘려, 컨텍스트 수집이 채팅을 막지 않게 한다.
 async function listContentsDir(dir: string, signal: AbortSignal): Promise<any[]> {
-  // dir 는 내부 호출에서 단일 세그먼트('' | 'uploads')만 들어오지만, 향후 외부
-  // 입력이 섞일 때 임의 경로가 노출되지 않도록 인코딩한다.
-  const url = `${JUPYTER_USER_BASE}/api/contents/${encodeURIComponent(dir)}?_=${Date.now()}`;
+  // dir 는 다중 세그먼트('a/b/c')일 수 있다 — 세그먼트별로 인코딩하고 '/'로 다시
+  // 이어, contents API의 경로 구분 슬래시는 살리되 각 이름은 안전하게 인코딩한다
+  // (encodeURIComponent(전체)는 '/'까지 %2F로 바꿔 일부 서버에서 404가 난다).
+  const encoded = dir.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+  const url = `${JUPYTER_USER_BASE}/api/contents/${encoded}?_=${Date.now()}`;
   const r = await fetch(url, {
     headers: { 'Cache-Control': 'no-cache' },
     credentials: 'include',
@@ -1351,24 +1353,51 @@ async function profileEntry(entry: any, signal: AbortSignal): Promise<FileProfil
   }
 }
 
-// 작업 폴더(~/work 루트 + uploads/ 한 단계)의 데이터 파일 목록 + 가능한 경우
-// 각 파일의 컬럼 정보를 컨텍스트 문자열로 만든다. 모델이 파일명·컬럼을 되묻지
-// 않고, 탐색형 질문엔 설명·제안을, 작업형엔 완전한 코드를 내게 하기 위함이다.
+// 작업 폴더를 재귀 탐색할 때 건너뛸 디렉터리(숨김·시스템·캐시). 사용자가 어느
+// 하위 폴더에 올렸든 데이터 파일은 찾되, 잡동사니 폴더는 들어가지 않는다.
+const SKIP_DIRS = new Set([
+  '.ipynb_checkpoints', '.git', 'node_modules', '__pycache__',
+  '.cache', '.local', '.conda', '.jupyter', '.config', 'lost+found',
+]);
+const MAX_DIR_LISTINGS = 40; // 디렉터리 조회 횟수 상한(느린 Jupyter 보호)
+const MAX_WALK_DEPTH = 3; // 루트 기준 하위 3단계까지
+
+// 사용자 작업 폴더(~/work)를 루트부터 너비우선으로 재귀 탐색해 데이터 파일을
+// 모은다. 예전엔 루트와 uploads/ 두 곳만 봐서, 사용자가 다른 하위 폴더에 올린
+// 파일을 Zini가 "없다"고 했다 — 이제 어디에 올리든 찾는다.
+async function walkDataFiles(signal: AbortSignal): Promise<any[]> {
+  const found: any[] = [];
+  let listings = 0;
+  const queue: { dir: string; depth: number }[] = [{ dir: '', depth: 0 }];
+  while (queue.length && listings < MAX_DIR_LISTINGS && found.length < 50) {
+    const { dir, depth } = queue.shift()!;
+    listings++;
+    const entries = await listContentsDir(dir, signal);
+    for (const c of entries) {
+      const nm = String(c?.name ?? '');
+      if (c?.type === 'directory') {
+        if (depth + 1 <= MAX_WALK_DEPTH && !nm.startsWith('.') && !SKIP_DIRS.has(nm)) {
+          queue.push({ dir: String(c.path || (dir ? `${dir}/${nm}` : nm)), depth: depth + 1 });
+        }
+      } else if (c?.type === 'file' && DATA_FILE_RE.test(nm)) {
+        found.push(c);
+        if (found.length >= 50) break;
+      }
+    }
+  }
+  return found;
+}
+
+// 작업 폴더(~/work) 전체에서 찾은 데이터 파일 목록 + 가능한 경우 각 파일의 컬럼
+// 정보를 컨텍스트 문자열로 만든다. 모델이 파일명·컬럼을 되묻지 않고, 탐색형
+// 질문엔 설명·제안을, 작업형엔 완전한 코드를 내게 하기 위함이다.
 // 거버넌스(FR-LLM-05): 컬럼명·자료형·행 수만 싣는다 — 실제 셀(행) 값은 포함 안 함.
 async function fetchWorkdirFiles(): Promise<string> {
-  // 9초 상한 — 컬럼 프로파일링(파일 다운로드·파싱)을 포함해도 채팅이 무한정 막히지 않게.
+  // 9초 상한 — 재귀 탐색 + 컬럼 프로파일링(다운로드·파싱)을 포함해도 채팅이 막히지 않게.
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), 9000);
   try {
-    const root = await listContentsDir('', ctrl.signal);
-    let entries = root.slice();
-    // 업로드가 ~/work/uploads/ 로 쌓이는 구성이면 그 한 단계도 함께 본다.
-    if (root.some((c) => c?.type === 'directory' && c?.name === 'uploads')) {
-      entries = entries.concat(await listContentsDir('uploads', ctrl.signal));
-    }
-    const dataFiles = entries
-      .filter((c) => c?.type === 'file' && DATA_FILE_RE.test(String(c?.name ?? '')))
-      .slice(0, 50); // 프롬프트가 비대해지지 않게 최대 50개
+    const dataFiles = (await walkDataFiles(ctrl.signal)).slice(0, 50);
     if (dataFiles.length === 0) return '';
 
     // 상위 N개만 컬럼까지 프로파일링(병렬·캐시). 나머지는 이름·크기만.
