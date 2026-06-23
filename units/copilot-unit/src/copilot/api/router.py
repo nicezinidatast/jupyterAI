@@ -335,6 +335,10 @@ async def chat(
     # 감사 actor: 로그인 세션(dp_session)으로 실제 사용자(이메일=아이디)를 해석한다.
     # 스트림이 시작되기 전에 계산해 generator 클로저에 담는다(요청 컨텍스트 보존).
     actor = await actor_from_request(request)
+    # 거버넌스: 셀 실행 출력(행 값 포함 가능)은 내부망 LLM일 때만 프론트가 컨텍스트에
+    # "[이 셀 출력]" 마커로 싣는다. 그 마커가 질문에 있으면 행 데이터가 전송된 것으로
+    # 정직하게 기록한다(외부 API 사용 시엔 프론트가 출력을 싣지 않으므로 False 유지).
+    row_data_sent = "[이 셀 출력]" in body.question
     audit_id = uuid4()
 
     async def generator():
@@ -367,7 +371,7 @@ async def chat(
                             "connection_id": body.connection_id,
                             "schema_attached": schema is not None,
                             "response_chars": len(full_text),
-                            "row_data_transmitted": False,
+                            "row_data_transmitted": row_data_sent,
                         },
                     )
                 )
