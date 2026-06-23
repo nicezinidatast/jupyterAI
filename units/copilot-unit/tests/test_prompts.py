@@ -15,6 +15,24 @@ def test_no_schema() -> None:
     assert "pandas" in p
 
 
+def test_complete_analysis_directives() -> None:
+    """채팅 코파일럿이 '되묻지 말고 완전한 분석 코드'를 내도록 안내하는지 확인.
+
+    스키마와 무관한 기본 지시이므로 schema=None(기본 워크플로)에서 검증한다.
+    문구는 _BASE_PROMPT의 실제 출력과 일치시켜, 프롬프트가 약화되면 깨지게 한다.
+    """
+    p = build_system_prompt(connection_engine="postgres", schema=None)
+    low = p.lower()
+    # 작업 폴더 파일 목록(이름만)을 활용하라는 안내가 있어야 한다.
+    assert "data files" in low
+    # 사용자에게 "실행해서 결과를 붙여 달라"고 떠넘기지 말라는 지시.
+    assert "paste the output back" in low
+    # 컬럼을 모르면 코드 안에서 점검(inspect)하라는 지시.
+    assert "inspect" in low
+    # 시각화는 선택(요청 시에만)이라는 안내.
+    assert "optional" in low
+
+
 def test_renders_tables_and_pii_marker() -> None:
     schema = {
         "tables": [
