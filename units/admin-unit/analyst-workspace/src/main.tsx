@@ -1183,7 +1183,9 @@ const DATA_FILE_RE = /\.(csv|tsv|txt|json|parquet|xlsx|xls)$/i;
 // {type:'directory', content:[{name, path, type, size}, …]} 형태가 온다.
 // 실패(404·권한·중단)는 빈 배열로 흘려, 컨텍스트 수집이 채팅을 막지 않게 한다.
 async function listContentsDir(dir: string, signal: AbortSignal): Promise<any[]> {
-  const url = `${JUPYTER_USER_BASE}/api/contents/${dir}?_=${Date.now()}`;
+  // dir 는 내부 호출에서 단일 세그먼트('' | 'uploads')만 들어오지만, 향후 외부
+  // 입력이 섞일 때 임의 경로가 노출되지 않도록 인코딩한다.
+  const url = `${JUPYTER_USER_BASE}/api/contents/${encodeURIComponent(dir)}?_=${Date.now()}`;
   const r = await fetch(url, {
     headers: { 'Cache-Control': 'no-cache' },
     credentials: 'include',
@@ -1219,7 +1221,9 @@ async function fetchWorkdirFiles(): Promise<string> {
         const kb =
           typeof c.size === 'number' ? ` (${Math.max(1, Math.round(c.size / 1024))}KB)` : '';
         // path가 있으면 상대경로(예: uploads/abc.xlsx)로 — 커널 cwd(루트) 기준 그대로 읽힌다.
-        return `- ${c.path || c.name}${kb}`;
+        // 파일명에 개행/탭이 섞여 프롬프트 컨텍스트를 오염시키지 않도록 정제한다.
+        const name = String(c.path || c.name).replace(/[\r\n\t]/g, ' ');
+        return `- ${name}${kb}`;
       });
     if (files.length === 0) return '';
     return (
@@ -1333,6 +1337,7 @@ function CopilotPanel({
 
       const res = await fetch('/api/copilot/chat', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           question: augmentedQuestion,
@@ -1531,7 +1536,11 @@ function CopilotPanel({
                     size="xs"
                     variant="light"
                     color="grape"
-                    onClick={() => blocks.forEach((b) => onInsert(b))}
+                    onClick={async () => {
+                      // 직렬 삽입 — REST 폴백 경로에서 동시 GET→PUT 이 서로의
+                      // 새 셀을 덮어써 유실되는 경쟁조건을 막는다.
+                      for (const b of blocks) await onInsert(b);
+                    }}
                   >
                     📥 셀에 삽입
                   </Button>
