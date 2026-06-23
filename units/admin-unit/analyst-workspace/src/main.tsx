@@ -1054,15 +1054,17 @@ function splitMarkdownCodeBlocks(text: string): Array<{ text: string; blocks: Co
   return [{ text, blocks }];
 }
 
-// 빈 채팅 화면에 띄우는 예시 프롬프트 — 클릭하면 입력창에 채워진다. 노트북
-// 코딩 어시스턴트의 대표 동작(불러오기·시각화·수정·정리)을 한눈에 보여 줘,
-// 처음 쓰는 사람도 "무엇을 시킬 수 있는지" 바로 감을 잡게 한다.
+// 빈 채팅 화면에 띄우는 예시 프롬프트 — 클릭하면 입력창에 채워진다.
+// 특정 셀 수정(에러·리팩토링)은 ✨ 버튼이 담당하므로, 채팅 예시는 채팅에서
+// 독립적으로 완결되는 작업으로 둔다. 사용자가 신용평가·스코어카드 분석가라
+// 도메인 예시 2개 + 파일 탐색 + 결과 저장을 적당히 섞어, 첫 화면에서 채팅의
+// 쓰임새를 도메인 맥락으로 바로 감 잡게 한다.
 const EXAMPLE_PROMPTS = [
-  'CSV 파일을 불러와 요약 통계를 보여줘',
-  '이 데이터프레임을 월별 매출 막대그래프로 그려서 셀에 추가해줘',
-  '방금 셀에서 난 에러를 고쳐줘',
-  '이 코드를 함수로 리팩토링해줘',
-  '결측치를 처리하고 정리하는 셀을 추가해줘',
+  '신용평가 스코어카드 모델링 예시 코드 짜줘',
+  'Fine Classing(변수 구간화) 기본 코드 짜줘',
+  '방금 올린 파일 불러와 요약 통계 보여줘',
+  '이 데이터 컬럼·분포를 살펴봐줘',
+  '방금 결과를 CSV로 저장해줘',
 ];
 
 // 코드 셀의 실행 오류(traceback)를 짧게 추출한다. 라이브 공유 모델 셀과
@@ -1405,8 +1407,16 @@ async function fetchWorkdirFiles(): Promise<string> {
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), 9000);
   try {
-    const dataFiles = (await walkDataFiles(ctrl.signal)).slice(0, 50);
+    // 최근 수정 순(내림차순)으로 정렬 — "방금 올린/최근 파일" 질문을 가장 최근
+    // 파일로 해석할 수 있게 하고, 컬럼 프로파일링도 최근 파일부터 하게 한다.
+    // contents API의 last_modified는 ISO 문자열이라 사전식 정렬 = 시간 정렬.
+    const dataFiles = (await walkDataFiles(ctrl.signal))
+      .sort((a, b) =>
+        String(b?.last_modified ?? '').localeCompare(String(a?.last_modified ?? '')),
+      )
+      .slice(0, 50);
     if (dataFiles.length === 0) return '';
+    const newestName = String(dataFiles[0].path || dataFiles[0].name).replace(/[\r\n\t]/g, ' ');
 
     // 상위 N개만 컬럼까지 프로파일링(병렬·캐시). 나머지는 이름·크기만.
     const profiles = await Promise.all(
@@ -1415,23 +1425,26 @@ async function fetchWorkdirFiles(): Promise<string> {
     const profByPath = new Map<string, FileProfile>();
     profiles.forEach((p) => p && profByPath.set(p.path, p));
 
-    const lines = dataFiles.map((c) => {
+    const lines = dataFiles.map((c, i) => {
       // path가 있으면 상대경로(예: uploads/abc.xlsx)로 — 커널 cwd(루트) 기준 그대로 읽힌다.
       // 파일명에 개행/탭이 섞여 프롬프트 컨텍스트를 오염시키지 않도록 정제한다.
       const name = String(c.path || c.name).replace(/[\r\n\t]/g, ' ');
+      const recent = i === 0 ? ' [가장 최근]' : ''; // 정렬상 첫 번째 = 가장 최근 수정
       const kb = typeof c.size === 'number' ? ` (${Math.max(1, Math.round(c.size / 1024))}KB)` : '';
       const prof = profByPath.get(String(c.path || c.name));
       if (prof && prof.columns.length) {
         const rowsTxt = prof.rows != null ? `, ${prof.rows.toLocaleString()}행` : '';
         const cols = prof.columns.map((col) => `${col.name}(${col.type})`).join(', ');
-        return `- ${name}${kb}${rowsTxt}\n  컬럼: ${cols}`;
+        return `- ${name}${kb}${rowsTxt}${recent}\n  컬럼: ${cols}`;
       }
-      return `- ${name}${kb}`;
+      return `- ${name}${kb}${recent}`;
     });
 
     return (
       `작업 폴더(~/work)의 데이터 파일과, 가능한 경우 각 파일의 컬럼 정보입니다. ` +
-      `컬럼명·자료형·행 수만 포함하며 실제 셀 값은 포함하지 않습니다.\n` +
+      `컬럼명·자료형·행 수만 포함하며 실제 셀 값은 포함하지 않습니다. 목록은 최근 수정 ` +
+      `순이며, 사용자가 "방금 올린/최근 파일"이라고 하면 가장 최근 파일(${newestName})을 ` +
+      `가리킵니다.\n` +
       `사용자가 파일을 묻거나 분석을 요청하면 아래 실제 파일명·컬럼을 그대로 사용하세요 ` +
       `(파일명·컬럼을 되묻지 마세요).\n` +
       lines.join('\n')

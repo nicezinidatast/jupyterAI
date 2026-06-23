@@ -139,6 +139,23 @@ async def _identity_from_session_cookie(
         )
 
 
+async def actor_from_request(request: Request) -> str:
+    """감사 로그 actor 용 — ``dp_session`` 쿠키로 로그인 사용자 이메일을 best-effort
+    로 해석한다. 쿠키가 없거나 세션이 만료됐거나 해석에 실패하면 ``"anonymous"``.
+
+    인증 게이트가 아니라 신원 *라벨링* 용도이므로 **절대 예외를 던지지 않는다** —
+    신원 해석 실패가 감사 기록 자체를 막아선 안 되기 때문이다. 회원가입 사용자는
+    email=아이디라 이 값이 곧 로그인 아이디가 된다(시드 사용자는 실제 이메일).
+    """
+    try:
+        ident = await _identity_from_session_cookie(
+            request, request.cookies.get(SESSION_COOKIE)
+        )
+        return ident.email if ident is not None else "anonymous"
+    except Exception:  # noqa: BLE001 — best-effort 라벨링: 요청을 절대 깨지 않는다
+        return "anonymous"
+
+
 async def get_current_identity(
     request: Request,
     authorization: Annotated[str | None, Header(alias="Authorization")] = None,
