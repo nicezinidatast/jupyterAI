@@ -1054,15 +1054,6 @@ function splitMarkdownCodeBlocks(text: string): Array<{ text: string; blocks: Co
   return [{ text, blocks }];
 }
 
-// 채팅엔 코드 자체가 아니라 코드 "주변 산문"만 보여 준다 — 코드는
-// copilot.ipynb(노트북)에 들어가기 때문. 펜스 블록을 제거하고 공백을 정리한다.
-function stripCodeFences(text: string): string {
-  return text
-    .replace(/```(sql|python)\n[\s\S]*?```/gi, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
 // 빈 채팅 화면에 띄우는 예시 프롬프트 — 클릭하면 입력창에 채워진다. 노트북
 // 코딩 어시스턴트의 대표 동작(불러오기·시각화·수정·정리)을 한눈에 보여 줘,
 // 처음 쓰는 사람도 "무엇을 시킬 수 있는지" 바로 감을 잡게 한다.
@@ -1184,6 +1175,69 @@ async function fetchNotebookContext(): Promise<{
   }
 }
 
+// 작업 폴더에서 "데이터 파일"로 볼 확장자. 노트북/스크립트/체크포인트는 제외하고
+// 분석 대상이 될 만한 표/문서 파일만 모델에 노출한다.
+const DATA_FILE_RE = /\.(csv|tsv|txt|json|parquet|xlsx|xls)$/i;
+
+// Jupyter contents API로 디렉터리 한 곳을 나열한다. 디렉터리를 GET하면
+// {type:'directory', content:[{name, path, type, size}, …]} 형태가 온다.
+// 실패(404·권한·중단)는 빈 배열로 흘려, 컨텍스트 수집이 채팅을 막지 않게 한다.
+async function listContentsDir(dir: string, signal: AbortSignal): Promise<any[]> {
+  // dir 는 내부 호출에서 단일 세그먼트('' | 'uploads')만 들어오지만, 향후 외부
+  // 입력이 섞일 때 임의 경로가 노출되지 않도록 인코딩한다.
+  const url = `${JUPYTER_USER_BASE}/api/contents/${encodeURIComponent(dir)}?_=${Date.now()}`;
+  const r = await fetch(url, {
+    headers: { 'Cache-Control': 'no-cache' },
+    credentials: 'include',
+    cache: 'no-store',
+    signal,
+  });
+  if (!r.ok) return [];
+  const j = await r.json();
+  return Array.isArray(j?.content) ? j.content : [];
+}
+
+// 작업 폴더(~/work 루트 + uploads/ 한 단계)의 데이터 파일 목록을 컨텍스트
+// 문자열로 만든다. 모델이 파일명을 되묻지 않고 곧바로 불러오는 완전한 분석
+// 코드를 쓰게 하기 위함이다.
+// 거버넌스(FR-LLM-05): 파일 "이름·크기"만 싣는다 — 파일 내용·행 데이터는 절대
+// 읽지 않는다(contents API의 디렉터리 GET은 파일 본문을 반환하지 않는다).
+async function fetchWorkdirFiles(): Promise<string> {
+  // 4초 상한 — Jupyter가 느리거나 재시작 중이어도 채팅이 무한정 막히지 않게.
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), 4000);
+  try {
+    const root = await listContentsDir('', ctrl.signal);
+    let entries = root.slice();
+    // 업로드가 ~/work/uploads/ 로 쌓이는 구성이면 그 한 단계도 함께 본다.
+    if (root.some((c) => c?.type === 'directory' && c?.name === 'uploads')) {
+      entries = entries.concat(await listContentsDir('uploads', ctrl.signal));
+    }
+    const files = entries
+      .filter((c) => c?.type === 'file' && DATA_FILE_RE.test(String(c?.name ?? '')))
+      // 프롬프트가 비대해지지 않게 최대 50개로 제한.
+      .slice(0, 50)
+      .map((c) => {
+        const kb =
+          typeof c.size === 'number' ? ` (${Math.max(1, Math.round(c.size / 1024))}KB)` : '';
+        // path가 있으면 상대경로(예: uploads/abc.xlsx)로 — 커널 cwd(루트) 기준 그대로 읽힌다.
+        // 파일명에 개행/탭이 섞여 프롬프트 컨텍스트를 오염시키지 않도록 정제한다.
+        const name = String(c.path || c.name).replace(/[\r\n\t]/g, ' ');
+        return `- ${name}${kb}`;
+      });
+    if (files.length === 0) return '';
+    return (
+      `작업 폴더(~/work)에 있는 데이터 파일 목록입니다. 사용자가 파일 분석을 요청하면 ` +
+      `아래 실제 파일명을 그대로 사용해 불러오는 코드를 쓰세요(파일명을 되묻지 마세요).\n` +
+      files.join('\n')
+    );
+  } catch {
+    return '';
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 function CopilotPanel({
   connectionId,
   onCellInserted,
@@ -1257,25 +1311,33 @@ function CopilotPanel({
     setPending('');
 
     try {
-      // 라이브 노트북 내용을 끌어와, "이 코드 리팩토링 해줘" 같은 후속 요청이
-      // 사용자가 실제로 보고 있는 셀을 함께 싣게 한다. 채팅 UI엔 여전히
-      // 원본 질문만 보이고, API 페이로드만 컨텍스트로 증강된다.
-      const { prompt: nbPrompt } = await fetchNotebookContext();
-      let augmentedQuestion = nbPrompt
-        ? `${nbPrompt}\n\n---\n\n사용자 요청:\n${question}`
+      // 컨텍스트 두 가지를 병렬로 끌어온다:
+      //  (1) 작업 폴더의 데이터 파일 목록 — "abc.xlsx 분석해줘"에 파일명을 되묻지
+      //      않고 곧바로 불러오는 완전한 코드를 쓰게 한다(파일명만, 거버넌스 안전).
+      //  (2) 라이브 노트북 셀·에러 — "이 코드 리팩토링/방금 에러 고쳐" 같은 후속 요청용.
+      // 채팅 UI엔 여전히 원본 질문만 보이고, API 페이로드만 컨텍스트로 증강된다.
+      const [filesPrompt, { prompt: nbPrompt }] = await Promise.all([
+        fetchWorkdirFiles(),
+        fetchNotebookContext(),
+      ]);
+      const contextParts = [filesPrompt, nbPrompt].filter(Boolean);
+      const contextBlock = contextParts.join('\n\n');
+      let augmentedQuestion = contextBlock
+        ? `${contextBlock}\n\n---\n\n사용자 요청:\n${question}`
         : question;
       // 백엔드 question 한도(8000자) 안전 상한. 초과하면 컨텍스트(앞부분)를 먼저
       // 줄여 사용자 질문은 보존하고, 그래도 길면(질문 자체가 매우 긺) 마지막에 하드 컷.
       const QLIMIT = 7900;
-      if (augmentedQuestion.length > QLIMIT && nbPrompt) {
+      if (augmentedQuestion.length > QLIMIT && contextBlock) {
         const tail = `\n\n---\n\n사용자 요청:\n${question}`;
         const room = Math.max(0, QLIMIT - tail.length);
-        augmentedQuestion = nbPrompt.slice(0, room) + tail;
+        augmentedQuestion = contextBlock.slice(0, room) + tail;
       }
       if (augmentedQuestion.length > QLIMIT) augmentedQuestion = augmentedQuestion.slice(0, QLIMIT);
 
       const res = await fetch('/api/copilot/chat', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           question: augmentedQuestion,
@@ -1446,10 +1508,6 @@ function CopilotPanel({
         {history.map((m, i) => {
           const blocks =
             m.role === 'assistant' ? splitMarkdownCodeBlocks(m.content)[0].blocks : [];
-          const narration =
-            m.role === 'assistant' && blocks.length > 0
-              ? stripCodeFences(m.content)
-              : m.content;
           return (
             // flexShrink: 0 — 없으면 flex-column 채팅 컨테이너가 옛 메시지를
             // 스크롤하는 대신 min-content로 짓눌러 버린다("기존 대화가 짜부되는" 버그).
@@ -1459,10 +1517,9 @@ function CopilotPanel({
                   {m.role === 'user' ? '나' : 'Zini'}
                 </Badge>
               </Group>
-              {/* 코드가 포함된 답변: 코드 자체가 아니라 그 주변 산문만 보여
-                 준다 — 코드는 copilot.ipynb에 들어간다. 순수 텍스트 답변
-                 ("스키마를 알려주세요" 등)은 그대로 보여 준다. */}
-              {narration && <Markdown>{narration}</Markdown>}
+              {/* 답변을 코드까지 포함해 그대로 보여 준다(코드 블록은 Markdown이
+                 스타일링). 아래 📥 버튼으로 같은 코드를 노트북 셀에도 넣을 수 있다. */}
+              {m.content && <Markdown>{m.content}</Markdown>}
               {m.role === 'assistant' && blocks.length > 0 && (
                 <Group mt={6} gap="xs">
                   {blocks.map((b, k) => (
@@ -1479,7 +1536,11 @@ function CopilotPanel({
                     size="xs"
                     variant="light"
                     color="grape"
-                    onClick={() => blocks.forEach((b) => onInsert(b))}
+                    onClick={async () => {
+                      // 직렬 삽입 — REST 폴백 경로에서 동시 GET→PUT 이 서로의
+                      // 새 셀을 덮어써 유실되는 경쟁조건을 막는다.
+                      for (const b of blocks) await onInsert(b);
+                    }}
                   >
                     📥 셀에 삽입
                   </Button>
