@@ -991,6 +991,33 @@ async function ensureCopilotFileExists(): Promise<void> {
 // 코파일럿이 만든 셀을 노트북에 꽂는 핵심 함수. 가능한 한 "라이브 경로"를 쓰고
 // (분석가가 보는 화면에 즉시 반영, 충돌 대화상자 없음), 안 되면 REST로 폴백한다.
 // 반환값의 mode로 호출자가 iframe 새로고침이 필요한지(rest일 때만) 판단한다.
+// 방금 삽입한(마지막) 셀을 곧바로 실행해 결과까지 바로 보여 준다. 마지막 셀을
+// 활성화하고 노트북 패널을 현재 위젯으로 올린 뒤 run-cell 명령을 보낸다. 커널이
+// 없으면 Lab이 자동 기동한다(첫 실행은 잠깐 느릴 수 있음). 실패해도 셀은 이미
+// 삽입돼 있어 사용자가 직접 실행하면 되므로 조용히 무시한다(삽입 자체는 성공 유지).
+async function runInsertedCell(app: any, panel: any): Promise<void> {
+  try {
+    if (!app?.commands?.execute) return;
+    const nb = panel?.content;
+    const count = nb?.widgets?.length ?? 0;
+    if (!nb || count === 0) return;
+    nb.activeCellIndex = count - 1; // addCell은 끝에 붙으므로 마지막이 방금 그 셀
+    try {
+      nb.deselectAll?.();
+    } catch {
+      /* 일부 버전엔 없음 */
+    }
+    try {
+      app.shell?.activateById?.(panel.id); // 명령이 이 노트북에 적용되게 현재로
+    } catch {
+      /* shell API 차이 */
+    }
+    await app.commands.execute('notebook:run-cell');
+  } catch {
+    /* 실행 실패(커널 미준비/명령 없음 등) — 삽입은 유지, 수동 실행 가능 */
+  }
+}
+
 async function insertCellIntoNotebook(
   language: 'sql' | 'python',
   source: string,
@@ -1024,6 +1051,8 @@ async function insertCellIntoNotebook(
         // 셀은 이미 라이브 모델에 들어가 있다. 저장 실패는 "분석가가 나중에
         // 수동 저장"이면 그만이므로, 이걸로 삽입 자체를 실패시키지 않는다.
       }
+      // 삽입과 동시에 실행(📥 = 삽입 + 실행) — 결과까지 바로 보이게 한다.
+      await runInsertedCell(app, panel);
       return { path: panel.context.path as string, mode: 'live' };
     } catch {
       // 라이브 경로 예외(Lab 부팅 중, API 변경 등) — 아래 REST로 폴백.
@@ -1729,7 +1758,9 @@ function CopilotPanel({
         // 감사 기록 실패가 사용자에게 보이는 동작을 깨면 안 된다 — 사용자는
         // 성공 토스트를 보고, 감사 실패는 백엔드 로그에만 남긴다.
       }
-      setLastInsert(`${block.language.toUpperCase()} 셀이 ${path} 에 추가됨`);
+      setLastInsert(
+        `${block.language.toUpperCase()} 셀이 ${path} 에 ${mode === 'live' ? '추가·실행됨' : '추가됨'}`,
+      );
       window.setTimeout(() => setLastInsert(null), 4000); // 4초 후 토스트 자동 사라짐
       // 라이브 삽입은 Lab 안에 이미 보인다 — REST 폴백(Lab 몰래 디스크 파일이
       // 바뀐 경우)일 때만 iframe 새로고침이 필요하다.
