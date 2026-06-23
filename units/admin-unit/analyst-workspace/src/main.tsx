@@ -1302,17 +1302,25 @@ function profileText(path: string, ext: string, text: string): FileProfile | nul
 
 async function profileXlsx(path: string, bytes: Uint8Array): Promise<FileProfile | null> {
   // SheetJS는 무겁다 — 동적 import로 별도 청크에 두어, 엑셀을 실제로 볼 때만 받는다.
-  const XLSX = await import('xlsx');
+  // SheetJS는 CommonJS라 번들 후 네임스페이스 모양이 갈린다: 빌드(rollup)에선
+  // read/utils 가 .default 안에 들어가고, dev(esbuild)에선 최상위에 붙는다.
+  // 둘 다 대응 — read 가 있는 객체를 골라야 런타임에서 'XLSX.read is not a function'을 피한다.
+  const mod: any = await import('xlsx');
+  const XLSX: any = typeof mod?.read === 'function' ? mod : (mod?.default ?? mod);
+  if (typeof XLSX?.read !== 'function') return null; // 파서 로딩 실패 → 이름만(폴백)
   const wb = XLSX.read(bytes, { type: 'array' });
   const sheet = wb.Sheets[wb.SheetNames[0]];
   if (!sheet) return null;
-  const aoa = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1, raw: true, defval: '' });
+  const aoa: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: '' });
   if (!aoa.length) return null;
-  const header = (aoa[0] || []).map((h) => String(h ?? '').trim());
+  const header: string[] = (aoa[0] || []).map((h: unknown) => String(h ?? '').trim());
   const body = aoa.slice(1);
   const columns = header
     .slice(0, MAX_COLS_PER_FILE)
-    .map((name, i) => ({ name: name || `col${i + 1}`, type: inferType(body.map((r) => r?.[i])) }));
+    .map((name: string, i: number) => ({
+      name: name || `col${i + 1}`,
+      type: inferType(body.map((r: any[]) => r?.[i])),
+    }));
   if (columns.length === 0) return null;
   return { path, rows: body.length, columns };
 }
