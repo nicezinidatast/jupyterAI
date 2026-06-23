@@ -29,6 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from audit.models import AuditLog
+from auth.api.oidc_dependency import actor_from_request
 from backend.db import get_session
 from credential.models import Credential
 from copilot.factory import get_provider
@@ -64,16 +65,19 @@ class CellInsertEvent(BaseModel):
 
 
 @router.post("/cell-inserted")
-async def cell_inserted(body: CellInsertEvent, session: Session) -> dict[str, str]:
+async def cell_inserted(
+    body: CellInsertEvent, session: Session, request: Request
+) -> dict[str, str]:
     """SPA가 코드 셀을 JupyterLab에 넣은 직후 호출하는 감사 훅(audit hook).
 
     추가 전용(append-only) ``copilot_cell_inserted`` 이벤트를 남겨, 감사자가
     어떤 생성 셀이 어느 노트북에 들어갔는지 정확히 재구성할 수 있게 한다.
     """
+    actor = await actor_from_request(request)
     session.add(
         AuditLog(
             event_type="copilot_cell_inserted",
-            actor_id="anonymous",
+            actor_id=actor,
             resource=f"notebook:{body.notebook_path}",
             result="success",
             occurred_at=datetime.utcnow(),
@@ -328,6 +332,9 @@ async def chat(
     # PII 정규식은 스트리밍 시작 전에 한 번만 로드해, 청크마다 재조회를 피한다.
     pii_patterns = await _load_pii_regexes_cached(session)
 
+    # 감사 actor: 로그인 세션(dp_session)으로 실제 사용자(이메일=아이디)를 해석한다.
+    # 스트림이 시작되기 전에 계산해 generator 클로저에 담는다(요청 컨텍스트 보존).
+    actor = await actor_from_request(request)
     audit_id = uuid4()
 
     async def generator():
@@ -350,7 +357,7 @@ async def chat(
                 session.add(
                     AuditLog(
                         event_type="copilot_chat",
-                        actor_id="anonymous",
+                        actor_id=actor,
                         resource=f"copilot:{provider.name}",
                         result="success" if full_text else "failure",
                         occurred_at=datetime.utcnow(),
@@ -471,11 +478,12 @@ async def edit_cell(
     pii_patterns = await _load_pii_regexes_cached(session)
     edited = _mask_text(_extract_code("".join(chunks)), pii_patterns)
 
+    actor = await actor_from_request(request)
     try:
         session.add(
             AuditLog(
                 event_type="copilot_cell_edit",
-                actor_id="anonymous",
+                actor_id=actor,
                 resource=f"copilot:{provider.name}",
                 result="success" if edited else "failure",
                 occurred_at=datetime.utcnow(),

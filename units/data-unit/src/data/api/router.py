@@ -323,12 +323,16 @@ from uuid import uuid4 as _uuid4
 from audit.models import AuditLog
 from data.models import FileUpload
 from data.services.file_ingest import IngestError, ingest_upload
+from auth.api.oidc_dependency import actor_from_request
 
 
 @router.post("/files/upload")
-async def upload_file(session: Session, upload: UploadFile = File(...)) -> dict[str, Any]:
+async def upload_file(
+    session: Session, request: Request, upload: UploadFile = File(...)
+) -> dict[str, Any]:
     if not upload.filename:
         raise HTTPException(status_code=422, detail="missing filename")
+    actor = await actor_from_request(request)
     try:
         result = await ingest_upload(upload.filename, upload)
     except IngestError as exc:
@@ -354,7 +358,7 @@ async def upload_file(session: Session, upload: UploadFile = File(...)) -> dict[
     session.add(
         AuditLog(
             event_type="file_uploaded",
-            actor_id="anonymous",
+            actor_id=actor,
             resource=f"file:{result.safe_name}",
             result="success",
             occurred_at=_dt.utcnow(),
