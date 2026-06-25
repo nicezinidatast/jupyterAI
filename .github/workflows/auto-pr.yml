@@ -51,7 +51,10 @@ jobs:
           base="$(git rev-parse FETCH_HEAD)"
 
           # 제목: main 이후 '첫' 커밋 제목(브랜치의 핵심 작업). 없으면 브랜치명으로 폴백.
-          title="$(git log --reverse --pretty=format:'%s' "${base}..HEAD" | head -n1)"
+          # 'git log | head' 는 pipefail 과 만나 SIGPIPE(exit 141)로 죽는다(커밋 많을수록 자주).
+          # 파이프 없이 변수에 담아 첫 줄을 파라미터 확장으로 뽑는다.
+          subjects="$(git log --reverse --pretty=format:'%s' "${base}..HEAD")"
+          title="${subjects%%$'\n'*}"
           [ -z "$title" ] && title="$branch"
 
           # 본문: 변경 요약(커밋 목록) — 커밋 내용을 그대로 평가하지 않도록 파일로 작성
