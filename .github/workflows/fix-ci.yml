@@ -1,8 +1,17 @@
-# CI 워크플로가 PR 에서 실패하면, 실패 로그를 Claude 에 넘겨 코드를 고쳐 PR 브랜치에 커밋한다.
+# CI 워크플로가 PR 에서 실패하면, 실패 로그를 Claude 에 넘겨 코드를 고쳐 '그 PR 브랜치'에 커밋한다.
 #
-# ※ 한계 1: 자동수정 커밋은 GITHUB_TOKEN(use_commit_signing)으로 올라가 CI 를 '자동 재실행'
-#   시키지 못한다. 수정 후 통과 여부는 그 브랜치에 한 번 더 push 하거나 'Re-run' 하면 확인.
-# ※ 한계 2: workflow_run 트리거는 이 파일이 main(기본 브랜치)에 있어야 동작한다(브랜치에선 안 돎).
+# ── 브랜치 안전 (다른 저장소에서 난 실제 운영 장애 교훈) ──
+#   이 워크플로는 workflow_run 이벤트로 돈다. 그 컨텍스트에서 GITHUB_REF 는 항상 '기본 브랜치(main)'다.
+#   use_commit_signing:true(=GitHub API 서명 커밋)를 쓰면 actions/checkout 으로 PR 브랜치를 받아도
+#   커밋이 GITHUB_REF(main)로 나가 PR 브랜치가 아닌 기본 브랜치에 직접 덮어써진다(260625 사고 패턴).
+#   그래서:
+#     1) use_commit_signing 을 쓰지 않는다 → 모델이 '로컬 git'으로 체크아웃된 PR 브랜치에만 push.
+#     2) head_branch 가 기본 브랜치면 job 자체를 건너뛴다(아래 if — 이중 안전장치).
+#     3) push 대상을 `HEAD:<head_branch>` 로 명시한다(절대 기본 브랜치로 안 가게).
+#
+# ※ 한계: 자동수정 커밋은 GITHUB_TOKEN 으로 push 되어 CI 를 '자동 재실행'시키지 못한다.
+#   수정 후 통과 여부는 그 브랜치에 한 번 더 push 하거나 'Re-run' 하면 확인.
+# ※ workflow_run 트리거는 이 파일이 main(기본 브랜치)에 있어야 동작한다(브랜치에선 안 돎).
 #
 # ── 필요한 GitHub Secret ──
 #   CLAUDE_CODE_OAUTH_TOKEN (claude-review.yml 과 동일)
@@ -21,21 +30,28 @@ permissions:
 jobs:
   fix:
     name: CI 실패 자동 수정
-    # CI 가 'PR 에서' 실패했을 때만 동작
+    # CI 가 'PR 에서' 실패했고, 그 대상이 '기본 브랜치가 아닐' 때만 동작.
+    # head_branch == 기본 브랜치면 봇이 main 에 쓰지 못하도록 job 자체를 건너뛴다.
     if: >-
       github.event.workflow_run.conclusion == 'failure' &&
-      github.event.workflow_run.event == 'pull_request'
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_branch != github.event.repository.default_branch
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_branch }}   # 실패한 PR 브랜치
           fetch-depth: 0
+      - name: git 신원 설정 (로컬 커밋용)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          use_commit_signing: true
+          # use_commit_signing 은 쓰지 않는다(위 '브랜치 안전' 참고). 서명 커밋은 workflow_run 에서
+          # 기본 브랜치(main)로 나가 PR 브랜치를 덮어쓰므로, 로컬 git 으로 직접 커밋·push 한다.
           prompt: |
             CI 워크플로 "${{ github.event.workflow_run.name }}" (run id ${{ github.event.workflow_run.id }})가
             브랜치 "${{ github.event.workflow_run.head_branch }}" 에서 실패했습니다.
@@ -49,10 +65,13 @@ jobs:
             1) `gh run view ${{ github.event.workflow_run.id }} --log-failed` 로 실패 로그를 확인하세요.
             2) 원인을 코드에서 찾아 수정하세요. 프론트 빌드 실패는 해당 SPA(units/admin-unit/<spa>)
                의 .ts/.tsx 를, ruff 관련이면 `uvx ruff check --fix .` / `uvx ruff format .` 으로.
-               수정 파일은 자동으로 이 브랜치에 커밋됩니다.
-            3) 무엇을 왜 고쳤는지 PR 에 코멘트로 한 줄 남기세요. (PR 번호는
-               `gh pr list --head "${{ github.event.workflow_run.head_branch }}"` 로 확인)
+            3) 수정했으면 '체크아웃된 이 PR 브랜치에만' 커밋·push 하세요. main 에는 절대 push 하지 마세요:
+                 git add -A
+                 git commit -m "fix(ci): CI 실패 자동 수정"
+                 git push origin "HEAD:${{ github.event.workflow_run.head_branch }}"
+            4) 무엇을 왜 고쳤는지 PR 에 코멘트로 한 줄 남기세요.
+               (PR 번호는 `gh pr list --head "${{ github.event.workflow_run.head_branch }}"` 로 확인)
             LLM 프롬프트 문자열·SQL 안전가드·기능성 문자열은 함부로 바꾸지 마세요. 확실히 고칠 수
             없으면(환경/비밀값 요구 등) 커밋하지 말고 원인·제안만 코멘트로 남기세요.
           claude_args: |
-            --allowedTools "Edit,Write,Read,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Bash(gh run view:*),Bash(gh pr list:*),Bash(gh pr comment:*)"
+            --allowedTools "Edit,Write,Read,Bash(gh run view:*),Bash(gh pr list:*),Bash(gh pr comment:*),Bash(uvx ruff:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status:*),Bash(git diff:*)"
