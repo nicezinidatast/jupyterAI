@@ -1,14 +1,23 @@
-# PR 의 검토(Claude)와 CI 가 모두 통과하고 머지 충돌이 없으면 Slack 으로 "머지 준비 완료" 알림.
-# 윈도우 15분 폴링(pr-notify)을 대체 — GitHub 에서 마지막 검사가 끝나는 즉시 동작(PC 불필요).
+# PR 의 검토(Claude)와 CI 결과를 Slack 으로 알린다 — 성공·실패 둘 다.
+#   - 둘 다 통과 + 머지 충돌 없음 → "✅ 머지 준비 완료"
+#   - CI 또는 검토가 실패        → "❌ 검사 실패"(어느 검사가 깨졌는지 + 실행 로그 링크)
+#   - 통과했지만 머지 충돌        → "⚠️ 머지 충돌"
+# 로컬 폴링(윈도우 작업 스케줄러 등)을 대체 — GitHub 에서 마지막 검사가 끝나는 즉시 동작(PC 불필요).
 #
 # 동작:
-#   CI / Claude PR review 워크플로가 완료될 때마다 트리거 → 그 head SHA 에서 두 워크플로가
-#   모두 통과이고 PR 이 충돌 없으면 Slack 전송. 둘 중 '마지막에 끝난' 쪽만 '둘 다 통과'를
-#   보게 되어 자연스럽게 한 번만 알린다(거의 동시 완료 시 드물게 2회 — 무해).
+#   CI / Claude PR review 워크플로가 완료될 때마다 트리거. 방금 끝난 워크플로가 '실패'면
+#   즉시 실패 알림을, '성공'이면 양쪽이 모두 통과했는지 확인 후 준비/충돌 알림을 보낸다.
 #
 # 전제:
-#   - ※ workflow_run 트리거라 이 파일은 main(기본 브랜치)에 있어야 동작한다(브랜치에선 안 돎).
+#   - ※ workflow_run 트리거라 이 파일은 기본 브랜치(main/master)에 있어야 동작한다(브랜치에선 안 돎).
 #   - SLACK_WEBHOOK_URL 시크릿(배포 알림과 동일) 재사용. 미설정이면 조용히 건너뜀.
+#   - ※ gh pr list 는 반드시 `--repo "$REPO"` 를 줘야 한다. 이 job 은 actions/checkout 을 하지
+#     않아 로컬 git 컨텍스트가 없는데, --repo 가 없으면 gh 가 git 저장소를 찾으려다
+#     `fatal: not a git repository` 로 죽어 step 이 실패한다.
+#
+# ADAPT: workflows: 의 이름은 이 리포의 CI / 리뷰 워크플로 `name:` 과 정확히 일치해야 한다
+#        (ci.yml 의 name 이 "CI", claude-review.yml 의 name 이 "Claude PR review" 가 기본값).
+#        리포에서 이름을 바꿨으면 아래 workflows: 배열과 jq select(.name==...) 두 곳을 같이 고칠 것.
 name: PR ready notify
 
 on:
@@ -27,15 +36,14 @@ concurrency:
 
 jobs:
   notify:
-    name: 검토·CI 통과 → Slack 머지 준비 알림
+    name: 검토·CI 결과 → Slack 알림(성공·실패 모두)
     runs-on: ubuntu-latest
-    # PR 에서 온 실행만, 기본 브랜치 제외, 트리거 워크플로가 성공했을 때만
+    # PR 에서 온 실행만, 기본 브랜치 제외. 성공·실패 분기는 아래 스크립트에서.
     if: >
       github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.head_branch != github.event.repository.default_branch &&
-      github.event.workflow_run.conclusion == 'success'
+      github.event.workflow_run.head_branch != github.event.repository.default_branch
     steps:
-      - name: 두 워크플로 통과 + 머지 가능 확인 후 Slack
+      - name: 결과 판정 후 Slack(준비 완료 / 검사 실패 / 머지 충돌)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -43,6 +51,9 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           BRANCH: ${{ github.event.workflow_run.head_branch }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          THIS_NAME: ${{ github.event.workflow_run.name }}
+          THIS_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          THIS_URL: ${{ github.event.workflow_run.html_url }}
         run: |
           set -euo pipefail
 
@@ -50,32 +61,54 @@ jobs:
             echo "SLACK_WEBHOOK_URL 미설정 — 알림 건너뜀."; exit 0
           fi
 
-          # 이 head SHA 의 'CI' 와 'Claude PR review' 워크플로 최신 결과(conclusion)
+          # 이 브랜치의 열린 PR(성공·실패 모두 PR 링크가 필요). --repo 필수(위 주석 참고).
+          pr="$(gh pr list --repo "$REPO" --head "$BRANCH" --base "$DEFAULT_BRANCH" --state open --json number,title,url,mergeable --jq '.[0] // empty')"
+          if [ -z "$pr" ]; then echo "열린 PR 없음 — 종료"; exit 0; fi
+          num="$(echo "$pr" | jq -r '.number')"
+          title="$(echo "$pr" | jq -r '.title')"
+          url="$(echo "$pr" | jq -r '.url')"
+          mergeable="$(echo "$pr" | jq -r '.mergeable')"     # MERGEABLE / CONFLICTING / UNKNOWN
+          ts="$(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M:%S KST')"
+
+          send() {  # $1 = Slack 본문
+            payload="$(jq -nc --arg t "$1" '{text:$t}')"
+            curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null \
+              && echo "Slack 전송 완료" || echo "Slack 전송 실패(무시)"
+          }
+
+          # ── 실패 경로: 방금 끝난 워크플로(CI 또는 검토)가 실패면 즉시 알림 ──
+          # 왜 printf: bash 큰따옴표 안의 "\n" 은 실제 줄바꿈이 아니라 리터럴 백슬래시+n 이라
+          # jq 가 그걸 JSON 으로 다시 이스케이프(\\n)해 Slack 이 '\n' 글자를 그대로 보여줬다.
+          # printf 는 '\n' 을 실제 줄바꿈으로 풀어 주고, 본문은 %s 플레이스홀더로 넘겨
+          # 제목에 % 나 백슬래시가 있어도 안전하다.
+          case "$THIS_CONCLUSION" in
+            failure|timed_out|startup_failure)
+              text="$(printf '❌ *검사 실패* · <%s|PR #%s>\n%s\n실패한 검사: *%s* (<%s|실행 로그>)\n수정이 필요함 · %s\n`%s` / `%s`' \
+                "$url" "$num" "$title" "$THIS_NAME" "$THIS_URL" "$ts" "$REPO" "$BRANCH")"
+              send "$text"; exit 0;;
+            success) ;;     # 성공 경로로 진행
+            *) echo "결론 '${THIS_CONCLUSION}' — 알림 대상 아님(취소/스킵 등)"; exit 0;;
+          esac
+
+          # ── 성공 경로: 양쪽(CI·검토)이 모두 끝나고 통과 + 머지 가능일 때만 ──
+          # 이 head SHA 의 'CI' 와 'Claude PR review' 최신 결과(conclusion).
           runs="$(gh api "repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&per_page=100")"
           ci="$(echo "$runs" | jq -r '[.workflow_runs[]|select(.name=="CI")]|sort_by(.created_at)|last|.conclusion // "pending"')"
           review="$(echo "$runs" | jq -r '[.workflow_runs[]|select(.name=="Claude PR review")]|sort_by(.created_at)|last|.conclusion // "pending"')"
-          echo "head=${HEAD_SHA:0:7} CI=$ci review=$review"
+          echo "head=${HEAD_SHA:0:7} CI=$ci review=$review mergeable=$mergeable"
 
-          # CI 는 success 필수, 리뷰는 success/neutral/skipped(=검토 완료) 허용
           if [ "$ci" != "success" ]; then echo "CI 미통과 — 대기"; exit 0; fi
           case "$review" in
             success|neutral|skipped) ;;
             *) echo "리뷰 미완료 — 대기"; exit 0;;
           esac
 
-          # 이 브랜치의 열린 PR + 머지 가능 상태
-          pr="$(gh pr list --head "$BRANCH" --base "$DEFAULT_BRANCH" --state open --json number,title,url,mergeable --jq '.[0] // empty')"
-          if [ -z "$pr" ]; then echo "열린 PR 없음 — 종료"; exit 0; fi
-          num="$(echo "$pr" | jq -r '.number')"
-          title="$(echo "$pr" | jq -r '.title')"
-          url="$(echo "$pr" | jq -r '.url')"
-          mergeable="$(echo "$pr" | jq -r '.mergeable')"     # MERGEABLE / CONFLICTING / UNKNOWN
-          echo "PR #$num mergeable=$mergeable"
-          if [ "$mergeable" = "CONFLICTING" ]; then echo "머지 충돌 — 알림 X"; exit 0; fi
+          if [ "$mergeable" = "CONFLICTING" ]; then
+            text="$(printf '⚠️ *머지 충돌* · <%s|PR #%s>\n%s\n검토·CI 는 통과했지만 충돌 해결이 필요함 · %s\n`%s` / `%s`' \
+              "$url" "$num" "$title" "$ts" "$REPO" "$BRANCH")"
+            send "$text"; exit 0
+          fi
 
-          # Slack 전송(Incoming Webhook). 실패해도 워크플로는 통과(알림 문제로 막지 않음).
-          ts="$(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M:%S KST')"
-          text="✅ *머지 준비 완료* · <${url}|PR #${num}>\n${title}\n검토·CI 모두 통과 · 충돌 없음 · ${ts}\n\`${REPO}\` / \`${BRANCH}\`"
-          payload="$(jq -nc --arg t "$text" '{text:$t}')"
-          curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null \
-            && echo "Slack 전송 완료" || echo "Slack 전송 실패(무시)"
+          text="$(printf '✅ *머지 준비 완료* · <%s|PR #%s>\n%s\n검토·CI 모두 통과 · 충돌 없음 · %s\n`%s` / `%s`' \
+            "$url" "$num" "$title" "$ts" "$REPO" "$BRANCH")"
+          send "$text"
