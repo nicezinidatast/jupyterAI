@@ -36,6 +36,9 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # 봇이 연 PR(auto-pr 의 PAT)·봇 push 트리거 시 "non-human actor" hard-fail 방지.
+          # 자동수정은 GITHUB_TOKEN 커밋이라 재트리거 안 돼 무한 루프 없음.
+          allowed_bots: "*"
           use_commit_signing: true
           track_progress: true       # 액션이 PR에 추적 코멘트를 직접 생성·갱신(모델이 안 올려도 결과가 보이게)
           prompt: |
