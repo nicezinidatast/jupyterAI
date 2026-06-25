@@ -1,0 +1,81 @@
+# PR 의 검토(Claude)와 CI 가 모두 통과하고 머지 충돌이 없으면 Slack 으로 "머지 준비 완료" 알림.
+# 윈도우 15분 폴링(pr-notify)을 대체 — GitHub 에서 마지막 검사가 끝나는 즉시 동작(PC 불필요).
+#
+# 동작:
+#   CI / Claude PR review 워크플로가 완료될 때마다 트리거 → 그 head SHA 에서 두 워크플로가
+#   모두 통과이고 PR 이 충돌 없으면 Slack 전송. 둘 중 '마지막에 끝난' 쪽만 '둘 다 통과'를
+#   보게 되어 자연스럽게 한 번만 알린다(거의 동시 완료 시 드물게 2회 — 무해).
+#
+# 전제:
+#   - ※ workflow_run 트리거라 이 파일은 main(기본 브랜치)에 있어야 동작한다(브랜치에선 안 돎).
+#   - SLACK_WEBHOOK_URL 시크릿(배포 알림과 동일) 재사용. 미설정이면 조용히 건너뜀.
+name: PR ready notify
+
+on:
+  workflow_run:
+    workflows: ["CI", "Claude PR review"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: pr-ready-${{ github.event.workflow_run.head_branch }}-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    name: 검토·CI 통과 → Slack 머지 준비 알림
+    runs-on: ubuntu-latest
+    # PR 에서 온 실행만, 기본 브랜치 제외, 트리거 워크플로가 성공했을 때만
+    if: >
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_branch != github.event.repository.default_branch &&
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: 두 워크플로 통과 + 머지 가능 확인 후 Slack
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "SLACK_WEBHOOK_URL 미설정 — 알림 건너뜀."; exit 0
+          fi
+
+          # 이 head SHA 의 'CI' 와 'Claude PR review' 워크플로 최신 결과(conclusion)
+          runs="$(gh api "repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&per_page=100")"
+          ci="$(echo "$runs" | jq -r '[.workflow_runs[]|select(.name=="CI")]|sort_by(.created_at)|last|.conclusion // "pending"')"
+          review="$(echo "$runs" | jq -r '[.workflow_runs[]|select(.name=="Claude PR review")]|sort_by(.created_at)|last|.conclusion // "pending"')"
+          echo "head=${HEAD_SHA:0:7} CI=$ci review=$review"
+
+          # CI 는 success 필수, 리뷰는 success/neutral/skipped(=검토 완료) 허용
+          if [ "$ci" != "success" ]; then echo "CI 미통과 — 대기"; exit 0; fi
+          case "$review" in
+            success|neutral|skipped) ;;
+            *) echo "리뷰 미완료 — 대기"; exit 0;;
+          esac
+
+          # 이 브랜치의 열린 PR + 머지 가능 상태
+          pr="$(gh pr list --head "$BRANCH" --base "$DEFAULT_BRANCH" --state open --json number,title,url,mergeable --jq '.[0] // empty')"
+          if [ -z "$pr" ]; then echo "열린 PR 없음 — 종료"; exit 0; fi
+          num="$(echo "$pr" | jq -r '.number')"
+          title="$(echo "$pr" | jq -r '.title')"
+          url="$(echo "$pr" | jq -r '.url')"
+          mergeable="$(echo "$pr" | jq -r '.mergeable')"     # MERGEABLE / CONFLICTING / UNKNOWN
+          echo "PR #$num mergeable=$mergeable"
+          if [ "$mergeable" = "CONFLICTING" ]; then echo "머지 충돌 — 알림 X"; exit 0; fi
+
+          # Slack 전송(Incoming Webhook). 실패해도 워크플로는 통과(알림 문제로 막지 않음).
+          ts="$(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M:%S KST')"
+          text="✅ *머지 준비 완료* · <${url}|PR #${num}>\n${title}\n검토·CI 모두 통과 · 충돌 없음 · ${ts}\n\`${REPO}\` / \`${BRANCH}\`"
+          payload="$(jq -nc --arg t "$text" '{text:$t}')"
+          curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null \
+            && echo "Slack 전송 완료" || echo "Slack 전송 실패(무시)"
