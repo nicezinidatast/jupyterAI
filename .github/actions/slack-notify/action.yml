@@ -1,22 +1,54 @@
-# 배포 시작/성공/실패를 Slack Incoming Webhook 으로 보내는 재사용(composite) 액션.
-#   - deploy.yml 의 notify-start / notify-result 두 작업이 같은 포맷을 쓰도록 한 곳에 모음.
-#   - webhook-url(=secrets.SLACK_WEBHOOK_URL)이 비어 있으면 조용히 건너뜀 → 시크릿 미설정이어도 배포는 정상.
-#   - Slack 전송이 실패해도 항상 0 으로 종료 → 알림 문제로 배포가 막히지 않음.
+# 배포·PR 결과를 Slack Incoming Webhook 으로 보내는 재사용(composite) 액션.
+#   - deploy.yml(배포 시작/성공/실패) 과 pr-ready-notify.yml(머지 준비/검사 실패/머지 충돌)이
+#     '같은 리치 포맷'(좌측 색 막대 + 저장소/브랜치/식별자 + 🕒 시각 + 실행자 + 버튼)을 쓰도록 한 곳에 모음.
+#   - webhook-url(=secrets.SLACK_WEBHOOK_URL) 이 비어 있으면 조용히 건너뜀 → 시크릿 미설정이어도 동작은 정상.
+#   - Slack 전송이 실패해도 항상 0 으로 종료 → 알림 문제로 배포·검사가 막히지 않음.
 #
 # ※ Incoming Webhook URL 은 비밀값(아는 사람은 누구나 그 채널에 글을 쓸 수 있음)이라
 #   워크플로 파일에 박지 않고 GitHub Secret(SLACK_WEBHOOK_URL)으로 주입한다.
-name: "Slack 배포 알림"
-description: "배포 시작/성공/실패를 Slack Incoming Webhook 으로 전송한다. webhook 시크릿이 비어 있으면 건너뛴다."
+#
+# 식별자(ident)/본문(body)/버튼 URL 을 입력으로 덮어쓸 수 있어, 커밋 기반(배포)과 PR 기반(검토 결과)
+# 두 경우 모두 동일한 모양으로 렌더된다. 입력을 비우면 github 컨텍스트(커밋·브랜치·실행자)로 기본값을 채운다.
+name: "Slack 알림"
+description: "배포/PR 결과를 Slack 으로 전송(리치 attachment). webhook 시크릿이 비어 있으면 건너뛴다."
 
 inputs:
   webhook-url:
-    description: "Slack Incoming Webhook URL (secrets.SLACK_WEBHOOK_URL). 비어 있으면 알림을 건너뜀."
+    description: "Slack Incoming Webhook URL (secrets.SLACK_WEBHOOK_URL). 비면 알림을 건너뜀."
     required: true
   status:
-    description: "start | success | failure (색·이모지·제목을 결정)"
+    description: "start | success | failure | ready | checks-failed | conflict (색·이모지·제목 결정)"
     required: true
+  product:
+    description: "제목 접미 제품명"
+    required: false
+    default: "JupyterAI"
+  branch:
+    description: "표시할 브랜치 (비면 github.ref_name)"
+    required: false
+    default: ""
+  ident:
+    description: "식별자 라인 (예: 'PR `#16`'). 비면 '커밋 `{sha7}`'."
+    required: false
+    default: ""
+  body:
+    description: "본문 한 줄 (커밋 메시지/PR 제목). 비면 커밋 메시지 첫 줄."
+    required: false
+    default: ""
+  actor:
+    description: "실행자 (비면 github.actor)"
+    required: false
+    default: ""
   details:
-    description: '본문에 덧붙일 한 줄(예: "prod: success"). 선택.'
+    description: "본문에 덧붙일 한 줄(예: '검토·CI 모두 통과'). 선택."
+    required: false
+    default: ""
+  button-text:
+    description: "버튼 라벨"
+    required: false
+    default: "Actions 실행 보기"
+  button-url:
+    description: "버튼 URL (비면 이 실행의 Actions run URL)"
     required: false
     default: ""
 
@@ -29,18 +61,25 @@ runs:
         # 입력값
         SLACK_WEBHOOK_URL: ${{ inputs.webhook-url }}
         STATUS: ${{ inputs.status }}
+        PRODUCT: ${{ inputs.product }}
+        IN_BRANCH: ${{ inputs.branch }}
+        IN_IDENT: ${{ inputs.ident }}
+        IN_BODY: ${{ inputs.body }}
+        IN_ACTOR: ${{ inputs.actor }}
         DETAILS: ${{ inputs.details }}
-        # GitHub 컨텍스트(메시지에 들어갈 정보)
+        BTN_TEXT: ${{ inputs.button-text }}
+        IN_BTN_URL: ${{ inputs.button-url }}
+        # github 컨텍스트(입력이 비었을 때의 기본값)
         REPO: ${{ github.repository }}
-        BRANCH: ${{ github.ref_name }}
+        CTX_BRANCH: ${{ github.ref_name }}
         SHA: ${{ github.sha }}
-        ACTOR: ${{ github.actor }}
+        CTX_ACTOR: ${{ github.actor }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         COMMIT_MSG: ${{ github.event.head_commit.message }}
       run: |
         set -euo pipefail
 
-        # webhook 미설정(=아직 시크릿 안 넣음)이면 배포를 막지 않고 조용히 통과
+        # webhook 미설정이면 동작을 막지 않고 조용히 통과
         if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
           echo "SLACK_WEBHOOK_URL 미설정 — Slack 알림을 건너뜁니다."
           exit 0
@@ -48,35 +87,49 @@ runs:
 
         # 상태별 색 막대 / 이모지 / 제목
         case "$STATUS" in
-          start)   color="#2f6fe8"; emoji="🚀"; heading="배포 시작";;
-          success) color="#2eb67d"; emoji="✅"; heading="배포 성공";;
-          failure) color="#e01e5a"; emoji="❌"; heading="배포 실패";;
-          *)       color="#64748b"; emoji="ℹ️"; heading="배포 알림";;
+          start)         color="#2f6fe8"; emoji="🚀"; heading="배포 시작";;
+          success)       color="#2eb67d"; emoji="✅"; heading="배포 성공";;
+          failure)       color="#e01e5a"; emoji="❌"; heading="배포 실패";;
+          ready)         color="#2eb67d"; emoji="✅"; heading="머지 준비 완료";;
+          checks-failed) color="#e01e5a"; emoji="❌"; heading="검사 실패";;
+          conflict)      color="#d4a72c"; emoji="⚠️"; heading="머지 충돌";;
+          *)             color="#64748b"; emoji="ℹ️"; heading="알림";;
         esac
 
+        # 입력이 비면 github 컨텍스트로 기본값
+        branch="${IN_BRANCH:-$CTX_BRANCH}"
+        actor="${IN_ACTOR:-$CTX_ACTOR}"
+        btn_url="${IN_BTN_URL:-$RUN_URL}"
         short_sha="${SHA:0:7}"
-        commit_first_line="$(printf '%s' "${COMMIT_MSG:-}" | head -n1)"
+        # 식별자: 비면 '커밋 `sha7`' (printf 단일따옴표라 backtick 은 literal → Slack 인라인 코드)
+        ident="${IN_IDENT:-}"
+        [ -z "$ident" ] && ident="$(printf '커밋 `%s`' "$short_sha")"
+        # 본문: 비면 커밋 메시지 첫 줄
+        body="${IN_BODY:-}"
+        [ -z "$body" ] && body="$(printf '%s' "${COMMIT_MSG:-}" | head -n1)"
+        # 한국시간(KST) — GitHub 러너는 UTC 라 TZ 명시.
+        ts="$(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M:%S KST')"
 
-        # 섹션1: 제목 + 저장소/브랜치/커밋 (+ 커밋 메시지 첫 줄)
-        #   format 문자열은 '작은따옴표' 라 backtick(`) 은 literal → Slack 인라인 코드로 렌더됨.
-        section1="$(printf '*%s %s — JupyterAI*\n저장소 *%s* · 브랜치 `%s` · 커밋 `%s`' \
-          "$emoji" "$heading" "$REPO" "$BRANCH" "$short_sha")"
-        if [ -n "$commit_first_line" ]; then
-          section1="$(printf '%s\n%s' "$section1" "$commit_first_line")"
+        # 섹션1: 제목 + 저장소/브랜치/식별자 (+ 본문 한 줄)
+        section1="$(printf '*%s %s — %s*\n저장소 *%s* · 브랜치 `%s` · %s' \
+          "$emoji" "$heading" "$PRODUCT" "$REPO" "$branch" "$ident")"
+        if [ -n "$body" ]; then
+          section1="$(printf '%s\n%s' "$section1" "$body")"
         fi
 
-        # 섹션2: 실행자 (+ 결과 상세: "prod: success")
-        section2="$(printf '실행: %s' "$ACTOR")"
+        # 섹션2: 시각(KST) + 실행자 (+ 상세)
+        section2="$(printf '🕒 시각: *%s*\n실행: %s' "$ts" "$actor")"
         if [ -n "${DETAILS:-}" ]; then
           section2="$(printf '%s\n%s' "$section2" "$DETAILS")"
         fi
 
-        # jq 로 JSON 을 안전하게 조립(커밋 메시지에 따옴표·특수문자가 있어도 안 깨지게).
+        # jq 로 JSON 안전 조립(메시지에 따옴표·특수문자가 있어도 안 깨지게).
         payload="$(jq -n \
           --arg color "$color" \
           --arg s1 "$section1" \
           --arg s2 "$section2" \
-          --arg run_url "$RUN_URL" \
+          --arg bt "$BTN_TEXT" \
+          --arg bu "$btn_url" \
           '{
             attachments: [
               {
@@ -86,20 +139,20 @@ runs:
                   { type: "section", text: { type: "mrkdwn", text: $s2 } },
                   { type: "actions", elements: [
                       { type: "button",
-                        text: { type: "plain_text", text: "Actions 실행 보기" },
-                        url: $run_url }
+                        text: { type: "plain_text", text: $bt },
+                        url: $bu }
                   ] }
                 ]
               }
             ]
           }')"
 
-        # 전송. 알림 실패가 배포를 막지 않도록 항상 성공(exit 0)으로 끝낸다.
+        # 전송. 알림 실패가 동작을 막지 않도록 항상 성공(exit 0)으로 끝낸다.
         http_code="$(curl -sS -o /tmp/slack_resp.txt -w '%{http_code}' \
           -X POST -H 'Content-type: application/json' \
           --data "$payload" "$SLACK_WEBHOOK_URL" || true)"
         echo "Slack 응답: HTTP ${http_code} - $(cat /tmp/slack_resp.txt 2>/dev/null || true)"
         if [ "$http_code" != "200" ]; then
-          echo "::warning::Slack 알림 전송 실패(HTTP ${http_code}). 배포에는 영향 없음."
+          echo "::warning::Slack 알림 전송 실패(HTTP ${http_code}). 동작에는 영향 없음."
         fi
         exit 0
